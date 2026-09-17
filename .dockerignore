@@ -1,0 +1,6 @@
+.git/
+.jj/
+build/
+pb_data/
+*.log
+.env
