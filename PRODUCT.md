@@ -67,7 +67,8 @@ the request, empty when none), `stream`. Request history is disposable pre-relea
 the provider relation migration resets existing `request_logs` and `request_bodies` rows.
 Usage: `prompt_tokens`, `completion_tokens`, `total_tokens`, `cached_tokens` (prompt-cache
 hits, a subset of `prompt_tokens`) — all nullable.
-Timing: `ttft_ms` (streaming only), `total_ms`.
+Timing: `started_at` (gateway-side request start, UTC; NULL on rows logged before the field
+existed), `ttft_ms` (streaming only), `total_ms`. `created` is the row-write time, i.e. request end.
 Outcome: `status`, `error`, `finish_reason` (nullable, first choice; last non-empty wins on streams).
 
 ### `request_bodies`

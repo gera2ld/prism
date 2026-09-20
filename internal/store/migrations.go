@@ -6,11 +6,13 @@ import (
 )
 
 func init() {
-	// Single initial migration: the app is pre-publication, so the schema
-	// is created directly in its final shape instead of replaying history.
-	// Databases created by earlier migration chains are incompatible;
-	// wipe pb_data and re-seed.
+	// Initial schema for pre-publication databases, plus additive follow-up
+	// migrations. New columns always arrive via their own idempotent
+	// migration so live data survives upgrades; the single-migration
+	// wipe-and-reseed approach applies only to migrations older than the
+	// follow-ups still registered here.
 	migrations.Register(createAll, nil, "1800000000_gateway.go")
+	migrations.Register(addRequestLogsStartedAt, nil, "1800000001_request_logs_started_at.go")
 }
 
 // buildSettingsCollection assembles the collection from the canonical schema
@@ -136,4 +138,19 @@ func createAll(app core.App) error {
 		return err
 	}
 	return ensureSettingsRow(app)
+}
+
+// addRequestLogsStartedAt persists the gateway-side request start time.
+// Idempotent: existing databases gain the column, fresh ones get it from
+// the chain, and rows logged before this migration keep started_at NULL.
+func addRequestLogsStartedAt(app core.App) error {
+	logs, err := app.FindCollectionByNameOrId("request_logs")
+	if err != nil {
+		return err
+	}
+	if logs.Fields.GetByName("started_at") != nil {
+		return nil
+	}
+	logs.Fields.Add(&core.DateField{Name: "started_at"})
+	return app.Save(logs)
 }

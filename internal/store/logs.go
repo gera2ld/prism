@@ -48,6 +48,11 @@ func (l *LogStore) Write(ctx context.Context, rec gateway.Record) error {
 	record.Set("cached_tokens", nullable(rec.Usage.CachedTokens))
 	record.Set("ttft_ms", nullable(rec.TTFTMS))
 	record.Set("total_ms", rec.TotalMS)
+	// Gateway-side request start in UTC. Zero (handmade records only) stays
+	// NULL; every gateway path populates Record.StartedAt.
+	if !rec.StartedAt.IsZero() {
+		record.Set("started_at", rec.StartedAt.UTC())
+	}
 	record.Set("status", rec.Status)
 	record.Set("error", rec.Error)
 	record.Set("finish_reason", nullable(rec.FinishReason))

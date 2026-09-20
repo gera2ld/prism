@@ -5,6 +5,7 @@ import (
 	"os"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/gera2ld/prism/internal/gateway"
 	"github.com/pocketbase/dbx"
@@ -12,8 +13,11 @@ import (
 	_ "github.com/pocketbase/pocketbase/migrations"
 )
 
+var testStartedAt = time.Date(2026, time.September, 20, 12, 0, 0, 0, time.UTC)
+
 func gatewayRecord(keyID, providerID string, total *int64) gateway.Record {
 	return gateway.Record{
+		StartedAt:     testStartedAt,
 		KeyID:         keyID,
 		KeyName:       "smoke",
 		Alias:         "alias",
@@ -246,6 +250,9 @@ func TestStoreEndToEnd(t *testing.T) {
 	if logs[0].GetString("api_key_name") != "smoke" {
 		t.Fatalf("unexpected api key name snapshot: %q", logs[0].GetString("api_key_name"))
 	}
+	if got := logs[0].GetDateTime("started_at").Time(); !got.Equal(testStartedAt) {
+		t.Fatalf("expected started_at %v, got %v", testStartedAt, got)
+	}
 	bodies, err := app.FindAllRecords("request_bodies")
 	if err != nil {
 		t.Fatal(err)
@@ -311,6 +318,10 @@ func TestLogCachedTokensAndFinishReason(t *testing.T) {
 	}
 	if got := logs[1].GetString("finish_reason"); got != "" {
 		t.Fatalf("expected empty finish_reason, got %q", got)
+	}
+	// A zero start time stays NULL.
+	if got := logs[1].GetDateTime("started_at"); !got.IsZero() {
+		t.Fatalf("expected NULL started_at, got %v", got.Time())
 	}
 }
 
