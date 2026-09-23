@@ -53,9 +53,14 @@ func (s Settings) normalized() Settings {
 	return s
 }
 
-// settingsFields is the collection schema, in creation order.
+// settingsFields is the collection schema, in creation order. created/updated
+// follow the PocketBase dashboard convention so config rows are auditable.
 func settingsFields() []func() core.Field {
 	return []func() core.Field{
+		func() core.Field { return &core.AutodateField{Name: "created", OnCreate: true} },
+		func() core.Field {
+			return &core.AutodateField{Name: "updated", OnCreate: true, OnUpdate: true}
+		},
 		func() core.Field { return &core.BoolField{Name: fieldCaptureBodies} },
 		func() core.Field {
 			return &core.NumberField{Name: fieldRetentionHours, OnlyInt: true, Required: true}
