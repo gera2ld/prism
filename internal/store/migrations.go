@@ -13,6 +13,7 @@ func init() {
 	// follow-ups still registered here.
 	migrations.Register(createAll, nil, "1800000000_gateway.go")
 	migrations.Register(addRequestLogsStartedAt, nil, "1800000001_request_logs_started_at.go")
+	migrations.Register(addTimestamps, nil, "1800000002_timestamps.go")
 }
 
 // buildSettingsCollection assembles the collection from the canonical schema
@@ -41,6 +42,8 @@ func ensureSettingsRow(app core.App) error {
 func createAll(app core.App) error {
 	providers := core.NewBaseCollection("providers")
 	providers.Fields.Add(
+		&core.AutodateField{Name: "created", OnCreate: true},
+		&core.AutodateField{Name: "updated", OnCreate: true, OnUpdate: true},
 		&core.TextField{Name: "name", Required: true, Pattern: `^[a-zA-Z0-9_-]+$`},
 		&core.URLField{Name: "base_url", Required: true},
 		&core.TextField{Name: "api_key", Hidden: true, Max: 16384},
@@ -53,6 +56,8 @@ func createAll(app core.App) error {
 
 	keys := core.NewBaseCollection("api_keys")
 	keys.Fields.Add(
+		&core.AutodateField{Name: "created", OnCreate: true},
+		&core.AutodateField{Name: "updated", OnCreate: true, OnUpdate: true},
 		&core.TextField{Name: "name", Required: true},
 		&core.TextField{Name: "key_hash", Hidden: true, Pattern: `^[a-f0-9]{64}$`},
 		&core.TextField{Name: "key_plain", Hidden: true, Max: 256},
@@ -68,6 +73,8 @@ func createAll(app core.App) error {
 
 	routes := core.NewBaseCollection("routes")
 	routes.Fields.Add(
+		&core.AutodateField{Name: "created", OnCreate: true},
+		&core.AutodateField{Name: "updated", OnCreate: true, OnUpdate: true},
 		&core.TextField{Name: "alias", Required: true, Pattern: `^[^\s]+$`},
 		&core.RelationField{Name: "provider", CollectionId: providers.Id, Required: true, CascadeDelete: true},
 		&core.TextField{Name: "upstream_model", Required: true},
@@ -121,6 +128,8 @@ func createAll(app core.App) error {
 
 	transformers := core.NewBaseCollection("transformers")
 	transformers.Fields.Add(
+		&core.AutodateField{Name: "created", OnCreate: true},
+		&core.AutodateField{Name: "updated", OnCreate: true, OnUpdate: true},
 		&core.TextField{Name: "name", Required: true},
 		&core.RelationField{Name: "provider", CollectionId: providers.Id, Required: true, CascadeDelete: true},
 		&core.TextField{Name: "model_pattern", Required: true, Max: 256, Help: "RE2 regexp on the upstream model (unanchored): ^gpt-4 for prefix, ^model$ for exact."},
@@ -153,4 +162,30 @@ func addRequestLogsStartedAt(app core.App) error {
 	}
 	logs.Fields.Add(&core.DateField{Name: "started_at"})
 	return app.Save(logs)
+}
+
+// addTimestamps backfills the dashboard-convention created/updated fields on
+// config collections. Idempotent; pre-existing rows keep empty values.
+func addTimestamps(app core.App) error {
+	for _, name := range []string{"providers", "api_keys", "routes", "transformers", settingsCollection} {
+		collection, err := app.FindCollectionByNameOrId(name)
+		if err != nil {
+			return err
+		}
+		changed := false
+		if collection.Fields.GetByName("created") == nil {
+			collection.Fields.Add(&core.AutodateField{Name: "created", OnCreate: true})
+			changed = true
+		}
+		if collection.Fields.GetByName("updated") == nil {
+			collection.Fields.Add(&core.AutodateField{Name: "updated", OnCreate: true, OnUpdate: true})
+			changed = true
+		}
+		if changed {
+			if err := app.Save(collection); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
 }
