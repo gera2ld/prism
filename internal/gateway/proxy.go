@@ -75,7 +75,7 @@ func (p *Proxy) handleModels(w http.ResponseWriter, r *http.Request) {
 		if err != nil {
 			continue
 		}
-		data = append(data, modelObject{Object: "model", ID: name, Owned_by: target.ProviderName})
+		data = append(data, modelObject{Object: "model", ID: name, OwnedBy: target.ProviderName, SupportedEndpointTypes: []string{"openai"}})
 	}
 	writeJSON(w, http.StatusOK, modelsResponse{Object: "list", Data: data})
 }
@@ -106,9 +106,10 @@ func writeAuthError(w http.ResponseWriter, err error) {
 }
 
 type modelObject struct {
-	Object   string `json:"object"`
-	ID       string `json:"id"`
-	Owned_by string `json:"owned_by"`
+	Object                 string   `json:"object"`
+	ID                     string   `json:"id"`
+	OwnedBy                string   `json:"owned_by"`
+	SupportedEndpointTypes []string `json:"supported_endpoint_types"`
 }
 
 type modelsResponse struct {

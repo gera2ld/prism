@@ -99,9 +99,10 @@ var chatChunkSchema = objProp("One server-sent event payload (after the data: pr
 var modelsResponseSchema = objProp("Usable aliases for the presented key.", nil, map[string]*huma.Schema{
 	"object": strProp("Always list."),
 	"data": {Type: "array", Description: "Aliases the key may use.", Items: objProp("A usable alias.", nil, map[string]*huma.Schema{
-		"object":   strProp("Always model."),
-		"id":       strProp("Alias."),
-		"owned_by": strProp("Provider that would serve the alias."),
+		"object":                   strProp("Always model."),
+		"id":                       strProp("Alias."),
+		"owned_by":                 strProp("Provider that would serve the alias."),
+		"supported_endpoint_types": {Type: "array", Description: "Endpoint types this gateway exposes for the alias.", Items: &huma.Schema{Type: "string"}},
 	})},
 })
 
