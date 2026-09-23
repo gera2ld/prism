@@ -231,6 +231,9 @@ func TestProxyChatAndModels(t *testing.T) {
 	if !strings.Contains(rec.Body.String(), `"owned_by":"prov"`) {
 		t.Fatalf("models owned_by should name the winning provider: %s", rec.Body.String())
 	}
+	if !strings.Contains(rec.Body.String(), `"supported_endpoint_types":["openai"]`) {
+		t.Fatalf("models should advertise openai endpoint types: %s", rec.Body.String())
+	}
 
 	rec = httptest.NewRecorder()
 	req = httptest.NewRequest(http.MethodGet, "/v1/models", nil)
