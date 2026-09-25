@@ -88,8 +88,9 @@ func (p *Proxy) deny(w http.ResponseWriter, start time.Time, presented Key, alia
 		StartedAt: start, KeyID: presented.ID, KeyName: presented.Name, Alias: alias,
 		ProviderID: blocked.ProviderID, ProviderName: blocked.ProviderName, UpstreamModel: blocked.Model,
 		TotalMS: p.Now().Sub(start).Milliseconds(), Status: http.StatusForbidden,
-		Error:  fmt.Sprintf("key %q is not allowed to use model %q", presented.Name, alias),
-		Bodies: p.captureBody(p.Capture(), string(raw), ""),
+		Outcome: OutcomeRejected,
+		Error:   fmt.Sprintf("key %q is not allowed to use model %q", presented.Name, alias),
+		Bodies:  p.captureBody(p.Capture(), string(raw), ""),
 	}
 	p.write(rec)
 	writeError(w, http.StatusForbidden, "forbidden", fmt.Sprintf("key %q is not allowed to use model %q", presented.Name, alias))
@@ -203,62 +204,116 @@ func (p *Proxy) handleChat(w http.ResponseWriter, r *http.Request) {
 	// traffic uniformly.
 	shaped, transformer, err := p.Config.Transform(r.Context(), target, mutated)
 	if err != nil {
+		outcome := OutcomeGatewayError
+		status := http.StatusInternalServerError
+		if r.Context().Err() != nil {
+			outcome = OutcomeClientDisconnected
+			status = 0
+		}
 		rec := Record{
 			StartedAt: start, KeyID: presented.ID, KeyName: presented.Name, Alias: alias,
-			ProviderID: target.ProviderID, ProviderName: target.ProviderName, UpstreamModel: target.Model, Stream: stream,
-			TotalMS: p.Now().Sub(start).Milliseconds(), Status: http.StatusInternalServerError,
-			Error:  err.Error(),
-			Bodies: p.captureBody(captureEnabled, string(raw), transformCaptureError(transformer, err)),
+			ProviderID: target.ProviderID, ProviderName: target.ProviderName, UpstreamModel: target.Model, Transformer: transformer, Stream: stream,
+			TotalMS: p.Now().Sub(start).Milliseconds(), Status: status,
+			Outcome: outcome,
+			Error:   err.Error(),
+			Bodies:  p.captureBody(captureEnabled, string(raw), transformCaptureError(transformer, err)),
 		}
 		p.write(rec)
-		writeError(w, http.StatusInternalServerError, "transform_error", "request transform failed")
-		return
-	}
-	upstreamReq := newUpstreamRequest(r, shaped, target)
-
-	upstream, upstreamErr := p.Client.Do(upstreamReq)
-	if upstreamErr != nil {
-		rec := Record{
-			StartedAt: start, KeyID: presented.ID, Alias: alias,
-			ProviderID: target.ProviderID, UpstreamModel: target.Model, Stream: stream,
-			TotalMS: p.Now().Sub(start).Milliseconds(), Status: http.StatusBadGateway,
-			Error:  upstreamErr.Error(),
-			Bodies: p.captureBody(captureEnabled, string(shaped), gatewayCaptureError(upstreamErr)),
+		if outcome != OutcomeClientDisconnected {
+			writeError(w, http.StatusInternalServerError, "transform_error", "request transform failed")
 		}
-		p.write(rec)
-		writeError(w, http.StatusBadGateway, "upstream_error", "upstream request failed")
 		return
 	}
-	defer upstream.Body.Close()
-
 	rec := Record{
 		StartedAt: start, KeyID: presented.ID, KeyName: presented.Name, Alias: alias,
 		ProviderID: target.ProviderID, ProviderName: target.ProviderName, UpstreamModel: target.Model, Transformer: transformer, Stream: stream,
 	}
+
+	upstreamReq, requestErr := newUpstreamRequest(r, shaped, target)
+	if requestErr != nil {
+		rec.TotalMS = p.Now().Sub(start).Milliseconds()
+		rec.Status = http.StatusInternalServerError
+		rec.Outcome = OutcomeGatewayError
+		rec.Error = requestErr.Error()
+		rec.Bodies = p.captureBody(captureEnabled, string(shaped), gatewayCaptureError(requestErr))
+		p.write(rec)
+		writeError(w, http.StatusInternalServerError, "upstream_error", "failed to build upstream request")
+		return
+	}
+
+	upstream, upstreamErr := p.Client.Do(upstreamReq)
+	if upstreamErr != nil {
+		rec.TotalMS = p.Now().Sub(start).Milliseconds()
+		rec.Outcome = OutcomeUpstreamError
+		rec.Status = http.StatusBadGateway
+		rec.Error = upstreamErr.Error()
+		if r.Context().Err() != nil {
+			rec.Outcome = OutcomeClientDisconnected
+			rec.Status = 0
+		}
+		rec.Bodies = p.captureBody(captureEnabled, string(shaped), gatewayCaptureError(upstreamErr))
+		p.write(rec)
+		if rec.Outcome != OutcomeClientDisconnected {
+			writeError(w, http.StatusBadGateway, "upstream_error", "upstream request failed")
+		}
+		return
+	}
+	defer upstream.Body.Close()
+
 	defer func() { rec.TotalMS = p.Now().Sub(start).Milliseconds(); p.write(rec) }()
 
 	if upstream.StatusCode >= 400 {
-		snippet, _ := limitedString(upstream.Body, maxBodyCapture)
+		snippet, readErr := limitedString(upstream.Body, maxBodyCapture)
 		rec.Status = upstream.StatusCode
+		rec.Outcome = OutcomeUpstreamError
 		rec.Error = snippet
+		if rec.Error == "" {
+			rec.Error = fmt.Sprintf("upstream returned HTTP %d", upstream.StatusCode)
+		}
+		if readErr != nil {
+			rec.Error += "\nresponse read failed: " + readErr.Error()
+		}
 		rec.Bodies = p.captureBody(captureEnabled, string(shaped), snippet)
 		copyHeaders(w.Header(), upstream.Header)
 		w.WriteHeader(upstream.StatusCode)
-		_, _ = io.Copy(w, strings.NewReader(snippet))
+		if _, writeErr := io.Copy(w, strings.NewReader(snippet)); writeErr != nil {
+			rec.Error += "\nresponse write failed: " + writeErr.Error()
+		}
 		return
 	}
 
 	if stream {
-		p.relayStream(w, upstream, &rec, captureEnabled, shaped)
+		p.relayStream(r.Context(), w, upstream, &rec, captureEnabled, shaped)
 		return
 	}
-	p.relayOnce(w, upstream, &rec, captureEnabled, shaped)
+	p.relayOnce(r.Context(), w, upstream, &rec, captureEnabled, shaped)
 }
 
 func gatewayCaptureError(err error) string { return "upstream error: " + err.Error() }
 
+type providerError struct {
+	Message string `json:"message"`
+	Type    string `json:"type"`
+	Code    string `json:"code"`
+}
+
+func providerErrorMessage(err *providerError) string {
+	if err.Message != "" {
+		return err.Message
+	}
+	if err.Code != "" {
+		return err.Code
+	}
+	if err.Type != "" {
+		return err.Type
+	}
+	return "provider error"
+}
+
 type sseParser struct {
-	carry []byte
+	carry     []byte
+	done      bool
+	streamErr string
 }
 
 func (s *sseParser) Feed(chunk []byte, rec *Record) {
@@ -275,50 +330,92 @@ func (s *sseParser) Feed(chunk []byte, rec *Record) {
 			}
 			return
 		}
-		line := data[:idx]
+		s.parseLine(data[:idx], rec)
 		data = data[idx+1:]
-		if payload, ok := bytes.CutPrefix(line, []byte("data: ")); ok {
-			var parsed struct {
-				Usage   *Usage `json:"usage"`
-				Choices []struct {
-					FinishReason *string `json:"finish_reason"`
-				} `json:"choices"`
-			}
-			if err := json.Unmarshal(payload, &parsed); err != nil {
-				continue
-			}
-			if parsed.Usage != nil {
-				rec.Usage = *parsed.Usage
-			}
-			// First choice only; last non-empty reason across chunks wins.
-			if len(parsed.Choices) > 0 {
-				if fr := parsed.Choices[0].FinishReason; fr != nil && *fr != "" {
-					reason := *fr
-					rec.FinishReason = &reason
-				}
-			}
+	}
+}
+
+func (s *sseParser) Close(rec *Record) {
+	if len(s.carry) == 0 {
+		return
+	}
+	s.parseLine(s.carry, rec)
+	s.carry = nil
+}
+
+func (s *sseParser) parseLine(line []byte, rec *Record) {
+	payload, ok := bytes.CutPrefix(line, []byte("data: "))
+	if !ok {
+		return
+	}
+	payload = bytes.TrimSpace(payload)
+	if bytes.Equal(payload, []byte("[DONE]")) {
+		s.done = true
+		return
+	}
+	var parsed struct {
+		Usage   *Usage `json:"usage"`
+		Choices []struct {
+			FinishReason *string `json:"finish_reason"`
+		} `json:"choices"`
+		Error *providerError `json:"error"`
+	}
+	if err := json.Unmarshal(payload, &parsed); err != nil {
+		return
+	}
+	if parsed.Usage != nil {
+		rec.Usage = *parsed.Usage
+	}
+	if len(parsed.Choices) > 0 {
+		if fr := parsed.Choices[0].FinishReason; fr != nil && *fr != "" {
+			reason := *fr
+			rec.FinishReason = &reason
 		}
+	}
+	if parsed.Error != nil && s.streamErr == "" {
+		s.streamErr = providerErrorMessage(parsed.Error)
 	}
 }
 
 func ptr[T any](v T) *T { return &v }
 
-func (p *Proxy) relayStream(w http.ResponseWriter, upstream *http.Response, rec *Record, capture bool, request []byte) {
-	flusher, ok := w.(http.Flusher)
-	if !ok {
+func (p *Proxy) relayStream(ctx context.Context, w http.ResponseWriter, upstream *http.Response, rec *Record, capture bool, request []byte) {
+	if _, ok := w.(http.Flusher); !ok {
+		rec.Status = http.StatusInternalServerError
+		rec.Outcome = OutcomeGatewayError
+		rec.Error = "streaming response writer does not support flushing"
+		rec.Bodies = p.captureBody(capture, string(request), "")
 		writeError(w, http.StatusInternalServerError, "streaming_unsupported", "streaming requires a flushable response writer")
 		return
 	}
+
+	rec.Status = upstream.StatusCode
 	copyHeaders(w.Header(), upstream.Header)
 	w.WriteHeader(upstream.StatusCode)
-	flusher.Flush()
+	controller := http.NewResponseController(w)
+	if err := controller.Flush(); err != nil {
+		if errors.Is(err, http.ErrNotSupported) {
+			rec.Outcome = OutcomeGatewayError
+			rec.Error = "streaming response writer does not support flushing"
+		} else {
+			rec.Outcome = OutcomeClientDisconnected
+			rec.Error = "response flush failed before first chunk: " + err.Error()
+		}
+		return
+	}
 
 	var responseBuf bytes.Buffer
 	var parser sseParser
 	buf := make([]byte, 32<<10)
 	first := true
 	for {
-		n, err := upstream.Body.Read(buf)
+		if err := ctx.Err(); err != nil {
+			rec.Outcome = OutcomeClientDisconnected
+			rec.Error = "request canceled while reading upstream response: " + err.Error()
+			break
+		}
+
+		n, readErr := upstream.Body.Read(buf)
 		if n > 0 {
 			if first {
 				rec.TTFTMS = ptr(p.Now().Sub(rec.StartedAt).Milliseconds())
@@ -329,12 +426,53 @@ func (p *Proxy) relayStream(w http.ResponseWriter, upstream *http.Response, rec 
 			if capture && responseBuf.Len() < maxBodyCapture {
 				responseBuf.Write(chunk)
 			}
-			if _, werr := w.Write(chunk); werr != nil {
+			written, writeErr := w.Write(chunk)
+			if writeErr == nil && written != len(chunk) {
+				writeErr = io.ErrShortWrite
+			}
+			if writeErr != nil {
+				rec.Outcome = OutcomeClientDisconnected
+				rec.Error = "response write failed: " + writeErr.Error()
 				break
 			}
-			flusher.Flush()
+			if err := controller.Flush(); err != nil {
+				rec.Outcome = OutcomeClientDisconnected
+				rec.Error = "response flush failed: " + err.Error()
+				break
+			}
+			if parser.streamErr != "" {
+				rec.Outcome = OutcomeUpstreamError
+				rec.Error = "stream error: " + parser.streamErr
+				break
+			}
+			if parser.done {
+				rec.Outcome = OutcomeCompleted
+				break
+			}
 		}
-		if err != nil {
+		if readErr != nil {
+			parser.Close(rec)
+			if parser.done {
+				rec.Outcome = OutcomeCompleted
+				break
+			}
+			if ctxErr := ctx.Err(); ctxErr != nil {
+				rec.Outcome = OutcomeClientDisconnected
+				rec.Error = "request canceled while reading upstream response: " + ctxErr.Error()
+				break
+			}
+			if parser.streamErr != "" {
+				rec.Outcome = OutcomeUpstreamError
+				rec.Error = "stream error: " + parser.streamErr
+				break
+			}
+			if !errors.Is(readErr, io.EOF) {
+				rec.Outcome = OutcomeUpstreamDisconnected
+				rec.Error = "upstream response read failed: " + readErr.Error()
+				break
+			}
+			rec.Outcome = OutcomeUpstreamDisconnected
+			rec.Error = "stream ended before [DONE]"
 			break
 		}
 	}
@@ -342,11 +480,10 @@ func (p *Proxy) relayStream(w http.ResponseWriter, upstream *http.Response, rec 
 		response, truncated := truncateCapture(responseBuf.String())
 		rec.Bodies = &Bodies{Request: string(request), Response: response, Truncated: truncated}
 	}
-	rec.Status = upstream.StatusCode
 }
 
-func (p *Proxy) relayOnce(w http.ResponseWriter, upstream *http.Response, rec *Record, capture bool, request []byte) {
-	body, _ := io.ReadAll(io.LimitReader(upstream.Body, 32<<20))
+func (p *Proxy) relayOnce(ctx context.Context, w http.ResponseWriter, upstream *http.Response, rec *Record, capture bool, request []byte) {
+	body, readErr := io.ReadAll(io.LimitReader(upstream.Body, 32<<20))
 	completion := chatCompletion{}
 	if err := json.Unmarshal(body, &completion); err == nil {
 		rec.Usage = completion.Usage
@@ -355,17 +492,61 @@ func (p *Proxy) relayOnce(w http.ResponseWriter, upstream *http.Response, rec *R
 				rec.FinishReason = fr
 			}
 		}
+		if completion.Error != nil {
+			rec.Outcome = OutcomeUpstreamError
+			rec.Error = providerErrorMessage(completion.Error)
+		}
 	}
 	if capture {
 		reqBody, reqTrunc := truncateCapture(string(request))
 		response, respTrunc := truncateCapture(string(body))
 		rec.Bodies = &Bodies{Request: reqBody, Response: response, Truncated: reqTrunc || respTrunc}
 	}
+
+	if readErr != nil {
+		if rec.Outcome == "" {
+			if ctxErr := ctx.Err(); ctxErr != nil {
+				rec.Outcome = OutcomeClientDisconnected
+				rec.Error = "request canceled while reading upstream response: " + ctxErr.Error()
+			} else {
+				rec.Outcome = OutcomeUpstreamDisconnected
+				rec.Error = "upstream response read failed: " + readErr.Error()
+			}
+		} else {
+			if rec.Error != "" {
+				rec.Error += "\n"
+			}
+			rec.Error += "upstream response read failed: " + readErr.Error()
+		}
+	} else if ctx.Err() != nil && rec.Outcome == "" {
+		rec.Outcome = OutcomeClientDisconnected
+		rec.Error = "request canceled before upstream response delivery: " + ctx.Err().Error()
+		return
+	}
+
 	rec.Status = upstream.StatusCode
 	copyHeaders(w.Header(), upstream.Header)
 	w.Header().Set("Content-Length", strconv.Itoa(len(body)))
 	w.WriteHeader(upstream.StatusCode)
-	_, _ = w.Write(body)
+	written, writeErr := w.Write(body)
+	if writeErr == nil && written != len(body) {
+		writeErr = io.ErrShortWrite
+	}
+	if writeErr != nil {
+		if rec.Outcome == "" {
+			rec.Outcome = OutcomeClientDisconnected
+		}
+		if rec.Error != "" {
+			rec.Error += "\nresponse write failed: "
+		} else {
+			rec.Error = "response write failed: "
+		}
+		rec.Error += writeErr.Error()
+		return
+	}
+	if rec.Outcome == "" {
+		rec.Outcome = OutcomeCompleted
+	}
 }
 
 type chatCompletion struct {
@@ -373,6 +554,7 @@ type chatCompletion struct {
 	Choices []struct {
 		FinishReason *string `json:"finish_reason"`
 	} `json:"choices"`
+	Error *providerError `json:"error"`
 }
 
 // rewriteChatBody applies the gateway's own mutation: the upstream model
@@ -396,9 +578,12 @@ func transformCaptureError(name string, err error) string {
 	return "transformer " + name + ": " + err.Error()
 }
 
-func newUpstreamRequest(r *http.Request, raw []byte, target Target) *http.Request {
+func newUpstreamRequest(r *http.Request, raw []byte, target Target) (*http.Request, error) {
 	url := strings.TrimSuffix(target.BaseURL, "/") + "/chat/completions"
-	upstream, _ := http.NewRequest(http.MethodPost, url, bytes.NewReader(raw))
+	upstream, err := http.NewRequestWithContext(r.Context(), http.MethodPost, url, bytes.NewReader(raw))
+	if err != nil {
+		return nil, err
+	}
 	upstream.Header = http.Header{}
 	for key, values := range r.Header {
 		if !hopByHop(key) && !strings.EqualFold(key, "Authorization") && !strings.EqualFold(key, "Host") {
@@ -409,7 +594,7 @@ func newUpstreamRequest(r *http.Request, raw []byte, target Target) *http.Reques
 		upstream.Header.Set("Authorization", "Bearer "+target.APIKey)
 	}
 	upstream.Host = upstream.URL.Host
-	return upstream
+	return upstream, nil
 }
 
 func hopByHop(key string) bool {

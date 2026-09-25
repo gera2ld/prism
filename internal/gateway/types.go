@@ -14,6 +14,17 @@ var (
 	ErrForbidden    = errors.New("forbidden")
 )
 
+type Outcome string
+
+const (
+	OutcomeCompleted            Outcome = "completed"
+	OutcomeClientDisconnected   Outcome = "client_disconnected"
+	OutcomeUpstreamDisconnected Outcome = "upstream_disconnected"
+	OutcomeUpstreamError        Outcome = "upstream_error"
+	OutcomeGatewayError         Outcome = "gateway_error"
+	OutcomeRejected             Outcome = "rejected"
+)
+
 type Key struct {
 	ID   string
 	Name string
@@ -90,6 +101,7 @@ type Record struct {
 	Transformer   string
 	Stream        bool
 	Usage         Usage
+	Outcome       Outcome
 	FinishReason  *string
 	TTFTMS        *int64
 	TotalMS       int64

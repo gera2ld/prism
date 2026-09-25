@@ -18,6 +18,7 @@ func init() {
 	migrations.Register(addRequestLogsStartedAt, nil, "1800000001_request_logs_started_at.go")
 	migrations.Register(addTimestamps, nil, "1800000002_timestamps.go")
 	migrations.Register(ensureUsageViews, nil, "1800000003_usage_views.go")
+	migrations.Register(addRequestLogsOutcome, nil, "1800000004_request_logs_outcome.go")
 }
 
 // buildSettingsCollection assembles the collection from the canonical schema
@@ -110,6 +111,7 @@ func createAll(app core.App) error {
 		&core.NumberField{Name: "total_ms", OnlyInt: true},
 		&core.NumberField{Name: "status", OnlyInt: true},
 		&core.TextField{Name: "error"},
+		&core.TextField{Name: "outcome", Max: 32},
 		&core.TextField{Name: "finish_reason", Max: 64},
 	)
 	logs.AddIndex("idx_request_logs_created", false, "created", "")
@@ -169,6 +171,18 @@ func addRequestLogsStartedAt(app core.App) error {
 		return nil
 	}
 	logs.Fields.Add(&core.DateField{Name: "started_at"})
+	return app.Save(logs)
+}
+
+func addRequestLogsOutcome(app core.App) error {
+	logs, err := app.FindCollectionByNameOrId("request_logs")
+	if err != nil {
+		return err
+	}
+	if logs.Fields.GetByName("outcome") != nil {
+		return nil
+	}
+	logs.Fields.Add(&core.TextField{Name: "outcome", Max: 32})
 	return app.Save(logs)
 }
 

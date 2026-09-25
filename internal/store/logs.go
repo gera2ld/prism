@@ -55,6 +55,7 @@ func (l *LogStore) Write(ctx context.Context, rec gateway.Record) error {
 	}
 	record.Set("status", rec.Status)
 	record.Set("error", rec.Error)
+	record.Set("outcome", string(rec.Outcome))
 	record.Set("finish_reason", nullable(rec.FinishReason))
 	if err := l.app.SaveWithContext(ctx, record); err != nil {
 		return err
