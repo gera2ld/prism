@@ -69,7 +69,11 @@ Usage: `prompt_tokens`, `completion_tokens`, `total_tokens`, `cached_tokens` (pr
 hits, a subset of `prompt_tokens`) — all nullable.
 Timing: `started_at` (gateway-side request start, UTC; NULL on rows logged before the field
 existed), `ttft_ms` (streaming only), `total_ms`. `created` is the row-write time, i.e. request end.
-Outcome: `status`, `error`, `finish_reason` (nullable, first choice; last non-empty wins on streams).
+Outcome: `status`, `outcome`, `error`, and `finish_reason`. `outcome` is one of `completed`,
+`client_disconnected`, `upstream_disconnected`, `upstream_error`, `gateway_error`, or `rejected`;
+`error` carries the detailed cause. `finish_reason` remains provider-produced, nullable, first
+choice only, and the last non-empty value wins on streams. A streamed response is completed
+only after its `[DONE]` event is successfully relayed.
 
 ### `request_bodies`
 

@@ -52,6 +52,69 @@ func (s *sliceSink) Write(_ context.Context, r gateway.Record) error {
 	return nil
 }
 
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripFunc) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
+
+type terminalBody struct {
+	data []byte
+	err  error
+	sent bool
+}
+
+func (b *terminalBody) Read(p []byte) (int, error) {
+	if b.sent {
+		return 0, io.EOF
+	}
+	b.sent = true
+	return copy(p, b.data), b.err
+}
+
+func (b *terminalBody) Close() error { return nil }
+
+type failingResponseWriter struct {
+	header   http.Header
+	code     int
+	writeErr error
+	flushErr error
+	flushAt  int
+	flushes  int
+	onWrite  func([]byte)
+}
+
+func newFailingResponseWriter(writeErr, flushErr error, flushAt int) *failingResponseWriter {
+	return &failingResponseWriter{
+		header:   make(http.Header),
+		writeErr: writeErr,
+		flushErr: flushErr,
+		flushAt:  flushAt,
+	}
+}
+
+func (w *failingResponseWriter) Header() http.Header { return w.header }
+
+func (w *failingResponseWriter) WriteHeader(code int) { w.code = code }
+
+func (w *failingResponseWriter) Write(p []byte) (int, error) {
+	if w.onWrite != nil {
+		w.onWrite(p)
+	}
+	if w.writeErr != nil {
+		return 0, w.writeErr
+	}
+	return len(p), nil
+}
+
+func (w *failingResponseWriter) Flush() {}
+
+func (w *failingResponseWriter) FlushError() error {
+	w.flushes++
+	if w.flushErr != nil && (w.flushAt == 0 || w.flushes == w.flushAt) {
+		return w.flushErr
+	}
+	return nil
+}
+
 func newUpstream(t *testing.T) *httptest.Server {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/v1/chat/completions", func(w http.ResponseWriter, r *http.Request) {
@@ -190,7 +253,7 @@ func TestProxyChatAndModels(t *testing.T) {
 	if sink.records[0].FinishReason == nil || *sink.records[0].FinishReason != "length" {
 		t.Fatalf("expected logged finish reason length, got %+v", sink.records[0])
 	}
-	if sink.records[0].Status != 200 || sink.records[0].Stream {
+	if sink.records[0].Status != 200 || sink.records[0].Stream || sink.records[0].Outcome != gateway.OutcomeCompleted {
 		t.Fatalf("unexpected record %+v", sink.records[0])
 	}
 
@@ -220,6 +283,9 @@ func TestProxyChatAndModels(t *testing.T) {
 	if streamRec.FinishReason == nil || *streamRec.FinishReason != "stop" {
 		t.Fatalf("expected streamed finish reason stop, got %+v", streamRec)
 	}
+	if streamRec.Outcome != gateway.OutcomeCompleted || streamRec.Error != "" {
+		t.Fatalf("expected completed stream outcome, got %+v", streamRec)
+	}
 
 	rec = httptest.NewRecorder()
 	req = httptest.NewRequest(http.MethodGet, "/v1/models", nil)
@@ -240,6 +306,289 @@ func TestProxyChatAndModels(t *testing.T) {
 	proxy.ServeHTTP(rec, req)
 	if rec.Code != 401 {
 		t.Fatalf("expected 401, got %d", rec.Code)
+	}
+}
+
+func TestProxyLogsClientCancellationRecord(t *testing.T) {
+	started := make(chan struct{})
+	sink := &sliceSink{}
+	proxy := gateway.New(&fakeConfig{
+		token:   "k",
+		targets: []gateway.Target{{BaseURL: "http://upstream.test", Model: "gpt-x"}},
+	}, sink, nil)
+	proxy.Client = &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		close(started)
+		<-r.Context().Done()
+		return nil, r.Context().Err()
+	})}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{"model":"alias","stream":true}`)).WithContext(ctx)
+	req.Header.Set("Authorization", "Bearer k")
+	done := make(chan struct{})
+	go func() {
+		proxy.ServeHTTP(httptest.NewRecorder(), req)
+		close(done)
+	}()
+
+	select {
+	case <-started:
+	case <-time.After(time.Second):
+		t.Fatal("upstream request did not start")
+	}
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("proxy did not stop after client cancellation")
+	}
+
+	if len(sink.records) != 1 {
+		t.Fatalf("expected one record, got %d", len(sink.records))
+	}
+	got := sink.records[0]
+	if got.Outcome != gateway.OutcomeClientDisconnected || got.Status != 0 || !strings.Contains(got.Error, "context canceled") {
+		t.Fatalf("unexpected cancellation record %+v", got)
+	}
+	if got.FinishReason != nil {
+		t.Fatalf("client cancellation must not synthesize finish reason: %+v", got)
+	}
+}
+
+func TestProxyLogsUpstreamStreamDisconnects(t *testing.T) {
+	tests := []struct {
+		name      string
+		readErr   error
+		wantError string
+	}{
+		{name: "clean EOF", readErr: io.EOF, wantError: "[DONE]"},
+		{name: "transport error", readErr: io.ErrUnexpectedEOF, wantError: "unexpected EOF"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			sink := &sliceSink{}
+			proxy := gateway.New(&fakeConfig{
+				token:   "k",
+				targets: []gateway.Target{{BaseURL: "http://upstream.test", Model: "gpt-x"}},
+			}, sink, nil)
+			proxy.Client = &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+				return &http.Response{
+					StatusCode: http.StatusOK,
+					Header:     http.Header{"Content-Type": {"text/event-stream"}},
+					Body: &terminalBody{
+						data: []byte("data: {\"choices\":[{\"finish_reason\":\"stop\"}]}\n\n"),
+						err:  tt.readErr,
+					},
+				}, nil
+			})}
+
+			writer := httptest.NewRecorder()
+			req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{"model":"alias","stream":true}`))
+			req.Header.Set("Authorization", "Bearer k")
+			proxy.ServeHTTP(writer, req)
+
+			if len(sink.records) != 1 {
+				t.Fatalf("expected one record, got %d", len(sink.records))
+			}
+			got := sink.records[0]
+			if got.Outcome != gateway.OutcomeUpstreamDisconnected || got.Status != http.StatusOK || !strings.Contains(got.Error, tt.wantError) {
+				t.Fatalf("unexpected upstream disconnect record %+v", got)
+			}
+			if got.FinishReason == nil || *got.FinishReason != "stop" {
+				t.Fatalf("expected provider finish reason to be preserved, got %+v", got)
+			}
+		})
+	}
+}
+
+func TestProxyLogsProviderStreamError(t *testing.T) {
+	sink := &sliceSink{}
+	proxy := gateway.New(&fakeConfig{
+		token:   "k",
+		targets: []gateway.Target{{BaseURL: "http://upstream.test", Model: "gpt-x"}},
+	}, sink, nil)
+	proxy.Client = &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     http.Header{"Content-Type": {"text/event-stream"}},
+			Body: &terminalBody{
+				data: []byte("data: {\"error\":{\"message\":\"generation failed\"}}\n\n"),
+				err:  io.EOF,
+			},
+		}, nil
+	})}
+
+	writer := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{"model":"alias","stream":true}`))
+	req.Header.Set("Authorization", "Bearer k")
+	proxy.ServeHTTP(writer, req)
+
+	if len(sink.records) != 1 {
+		t.Fatalf("expected one record, got %d", len(sink.records))
+	}
+	got := sink.records[0]
+	if got.Outcome != gateway.OutcomeUpstreamError || got.Error != "stream error: generation failed" {
+		t.Fatalf("unexpected provider stream error record %+v", got)
+	}
+	if got.FinishReason != nil {
+		t.Fatalf("provider error must not synthesize finish reason: %+v", got)
+	}
+}
+
+func TestProxyLogsClientStreamWriteFailure(t *testing.T) {
+	sink := &sliceSink{}
+	proxy := gateway.New(&fakeConfig{
+		token:   "k",
+		targets: []gateway.Target{{BaseURL: "http://upstream.test", Model: "gpt-x"}},
+	}, sink, nil)
+	proxy.Client = &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     http.Header{"Content-Type": {"text/event-stream"}},
+			Body: &terminalBody{
+				data: []byte("data: {\"choices\":[{\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n"),
+				err:  io.EOF,
+			},
+		}, nil
+	})}
+
+	writer := newFailingResponseWriter(io.ErrClosedPipe, nil, 0)
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{"model":"alias","stream":true}`))
+	req.Header.Set("Authorization", "Bearer k")
+	proxy.ServeHTTP(writer, req)
+
+	if len(sink.records) != 1 {
+		t.Fatalf("expected one record, got %d", len(sink.records))
+	}
+	got := sink.records[0]
+	if got.Outcome != gateway.OutcomeClientDisconnected || got.Status != http.StatusOK || !strings.Contains(got.Error, "closed pipe") {
+		t.Fatalf("unexpected client disconnect record %+v", got)
+	}
+	if got.FinishReason == nil || *got.FinishReason != "stop" {
+		t.Fatalf("expected provider finish reason to be preserved, got %+v", got)
+	}
+}
+
+func TestProxyLogsClientStreamFlushFailure(t *testing.T) {
+	sink := &sliceSink{}
+	proxy := gateway.New(&fakeConfig{
+		token:   "k",
+		targets: []gateway.Target{{BaseURL: "http://upstream.test", Model: "gpt-x"}},
+	}, sink, nil)
+	proxy.Client = &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     http.Header{"Content-Type": {"text/event-stream"}},
+			Body: &terminalBody{
+				data: []byte("data: {\"choices\":[{\"delta\":{\"content\":\"hi\"}}]}\n\n"),
+				err:  io.EOF,
+			},
+		}, nil
+	})}
+
+	writer := newFailingResponseWriter(nil, errors.New("connection reset by peer"), 2)
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{"model":"alias","stream":true}`))
+	req.Header.Set("Authorization", "Bearer k")
+	proxy.ServeHTTP(writer, req)
+
+	if len(sink.records) != 1 {
+		t.Fatalf("expected one record, got %d", len(sink.records))
+	}
+	got := sink.records[0]
+	if got.Outcome != gateway.OutcomeClientDisconnected || !strings.Contains(got.Error, "connection reset by peer") {
+		t.Fatalf("unexpected client flush failure record %+v", got)
+	}
+}
+
+func TestProxyCompletionWinsAfterDoneDelivered(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	sink := &sliceSink{}
+	proxy := gateway.New(&fakeConfig{
+		token:   "k",
+		targets: []gateway.Target{{BaseURL: "http://upstream.test", Model: "gpt-x"}},
+	}, sink, nil)
+	proxy.Client = &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     http.Header{"Content-Type": {"text/event-stream"}},
+			Body: &terminalBody{
+				data: []byte("data: {\"choices\":[{\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n"),
+				err:  io.EOF,
+			},
+		}, nil
+	})}
+
+	writer := newFailingResponseWriter(nil, nil, 0)
+	writer.onWrite = func(p []byte) {
+		if strings.Contains(string(p), "[DONE]") {
+			cancel()
+		}
+	}
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{"model":"alias","stream":true}`)).WithContext(ctx)
+	req.Header.Set("Authorization", "Bearer k")
+	proxy.ServeHTTP(writer, req)
+
+	if len(sink.records) != 1 {
+		t.Fatalf("expected one record, got %d", len(sink.records))
+	}
+	got := sink.records[0]
+	if got.Outcome != gateway.OutcomeCompleted || got.Error != "" {
+		t.Fatalf("late client cancellation must not overwrite completion: %+v", got)
+	}
+}
+
+func TestProxyLogsNonStreamingTransferFailures(t *testing.T) {
+	tests := []struct {
+		name        string
+		readErr     error
+		writeErr    error
+		wantOutcome gateway.Outcome
+		wantError   string
+	}{
+		{name: "upstream read", readErr: io.ErrUnexpectedEOF, wantOutcome: gateway.OutcomeUpstreamDisconnected, wantError: "unexpected EOF"},
+		{name: "client write", writeErr: io.ErrClosedPipe, wantOutcome: gateway.OutcomeClientDisconnected, wantError: "closed pipe"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			sink := &sliceSink{}
+			proxy := gateway.New(&fakeConfig{
+				token:   "k",
+				targets: []gateway.Target{{BaseURL: "http://upstream.test", Model: "gpt-x"}},
+			}, sink, nil)
+			proxy.Client = &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+				return &http.Response{
+					StatusCode: http.StatusOK,
+					Header:     make(http.Header),
+					Body: &terminalBody{
+						data: []byte(`{"choices":[{"finish_reason":"length"}]}`),
+						err:  tt.readErr,
+					},
+				}, nil
+			})}
+
+			var writer http.ResponseWriter = httptest.NewRecorder()
+			if tt.writeErr != nil {
+				writer = newFailingResponseWriter(tt.writeErr, nil, 0)
+			}
+			req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{"model":"alias"}`))
+			req.Header.Set("Authorization", "Bearer k")
+			proxy.ServeHTTP(writer, req)
+
+			if len(sink.records) != 1 {
+				t.Fatalf("expected one record, got %d", len(sink.records))
+			}
+			got := sink.records[0]
+			if got.Outcome != tt.wantOutcome || !strings.Contains(got.Error, tt.wantError) {
+				t.Fatalf("unexpected non-streaming failure record %+v", got)
+			}
+			if got.FinishReason == nil || *got.FinishReason != "length" {
+				t.Fatalf("expected provider finish reason to be preserved, got %+v", got)
+			}
+		})
 	}
 }
 
@@ -366,7 +715,7 @@ func TestProxyTransformErrorFailsClosed(t *testing.T) {
 	if rec.Code != 500 || !strings.Contains(rec.Body.String(), "transform_error") {
 		t.Fatalf("expected 500 transform_error, got %d %s", rec.Code, rec.Body.String())
 	}
-	if len(sink.records) != 1 || sink.records[0].Status != 500 || !strings.Contains(sink.records[0].Error, "boom") {
+	if len(sink.records) != 1 || sink.records[0].Status != 500 || sink.records[0].Outcome != gateway.OutcomeGatewayError || !strings.Contains(sink.records[0].Error, "boom") {
 		t.Fatalf("expected logged 500 with cause, got %+v", sink.records)
 	}
 }
@@ -401,6 +750,9 @@ func TestProxyDeniesDisallowedModel(t *testing.T) {
 		t.Fatalf("expected logged 403, got %+v", sink.records)
 	}
 	denied := sink.records[0]
+	if denied.Outcome != gateway.OutcomeRejected {
+		t.Fatalf("expected rejected outcome, got %+v", denied)
+	}
 	if denied.ProviderName != "prov" || denied.UpstreamModel != "gpt-x" || denied.KeyName != "laptop" || denied.Alias != "alias" {
 		t.Fatalf("denial must identify key/alias/blocked route, got %+v", denied)
 	}

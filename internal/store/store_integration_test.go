@@ -285,10 +285,12 @@ func TestLogCachedTokensAndFinishReason(t *testing.T) {
 	base := gateway.Record{
 		KeyID: key.ID, KeyName: "logtest", Alias: "alias",
 		ProviderID: providerID, ProviderName: "prov", UpstreamModel: "gpt-x",
-		TotalMS: 12, Status: 200,
+		TotalMS: 12, Status: 200, Outcome: gateway.OutcomeCompleted,
 	}
 	full := base
 	full.Usage = gateway.Usage{TotalTokens: &total, CachedTokens: &cached}
+	full.Outcome = gateway.OutcomeClientDisconnected
+	full.Error = "response write failed: io: read/write on closed pipe"
 	full.FinishReason = &reason
 	if err := sink.Write(context.Background(), full); err != nil {
 		t.Fatalf("write log: %v", err)
@@ -312,6 +314,15 @@ func TestLogCachedTokensAndFinishReason(t *testing.T) {
 	if got := logs[0].GetString("finish_reason"); got != "stop" {
 		t.Fatalf("expected finish_reason stop, got %q", got)
 	}
+	if got := logs[0].GetString("outcome"); got != "client_disconnected" {
+		t.Fatalf("expected client_disconnected outcome, got %q", got)
+	}
+	if got := logs[0].GetString("error"); !strings.Contains(got, "closed pipe") {
+		t.Fatalf("expected disconnect error, got %q", got)
+	}
+	if got := logs[1].GetString("outcome"); got != "completed" {
+		t.Fatalf("expected completed outcome, got %q", got)
+	}
 	// Absent data persists as JSON null, not a misleading zero.
 	if got := logs[1].GetString("cached_tokens"); got != "null" {
 		t.Fatalf("expected NULL cached_tokens, got %q", got)
@@ -322,6 +333,32 @@ func TestLogCachedTokensAndFinishReason(t *testing.T) {
 	// A zero start time stays NULL.
 	if got := logs[1].GetDateTime("started_at"); !got.IsZero() {
 		t.Fatalf("expected NULL started_at, got %v", got.Time())
+	}
+}
+
+func TestRequestLogsOutcomeMigrationIdempotent(t *testing.T) {
+	app := newTestApp(t)
+	logs, err := app.FindCollectionByNameOrId("request_logs")
+	if err != nil {
+		t.Fatal(err)
+	}
+	logs.Fields.RemoveByName("outcome")
+	if err := app.Save(logs); err != nil {
+		t.Fatal(err)
+	}
+	for range 2 {
+		if err := addRequestLogsOutcome(app); err != nil {
+			t.Fatalf("add request log outcome: %v", err)
+		}
+	}
+	logs, err = app.FindCollectionByNameOrId("request_logs")
+	if err != nil {
+		t.Fatal(err)
+	}
+	field := logs.Fields.GetByName("outcome")
+	text, ok := field.(*core.TextField)
+	if !ok || text.Max != 32 {
+		t.Fatalf("unexpected outcome field: %#v", field)
 	}
 }
 
