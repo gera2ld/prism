@@ -19,8 +19,12 @@ UI, and log store.
 
 ## Quick start (Docker)
 
-Images are published to `ghcr.io/gera2ld/prism` as `latest` on every push to `main`
-and each release, for both `linux/amd64` and `linux/arm64`.
+Images are published to `ghcr.io/gera2ld/prism` as `latest` when you push a
+release tag, for both `linux/amd64` and `linux/arm64`:
+
+```bash
+git tag v0.1.0 && git push origin v0.1.0
+```
 Prism needs one secret at runtime, used to encrypt stored credentials:
 
 ```bash
