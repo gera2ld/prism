@@ -1,11 +1,16 @@
 # syntax=docker/dockerfile:1
-FROM golang:1.27-alpine AS builder
+# $BUILDPLATFORM keeps the toolchain stage on the builder's native arch so the
+# Go compile cross-compiles natively instead of running under QEMU.
+FROM --platform=$BUILDPLATFORM golang:1.27-alpine AS builder
 WORKDIR /src
 COPY go.mod go.sum ./
 RUN go mod download
 COPY . .
-# Pure-Go SQLite (modernc) needs no CGO.
-RUN CGO_ENABLED=0 go build -trimpath -o /out/prism .
+# Pure-Go SQLite (modernc) needs no CGO. TARGETOS/TARGETARCH are supplied by
+# BuildKit; declaring them as ARGs is what puts them in scope here.
+ARG TARGETOS
+ARG TARGETARCH
+RUN CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH go build -trimpath -o /out/prism .
 
 FROM alpine:3.21
 # Outbound HTTPS to upstream providers needs CA certs; tzdata for log timestamps.
