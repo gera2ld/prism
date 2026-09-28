@@ -336,29 +336,191 @@ func TestLogCachedTokensAndFinishReason(t *testing.T) {
 	}
 }
 
-func TestRequestLogsOutcomeMigrationIdempotent(t *testing.T) {
+func TestUsageViewsSplitOutcomes(t *testing.T) {
 	app := newTestApp(t)
+	s, err := Open(app, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	providerID := seedConfig(t, app, s)
+	secret, err := s.CreateAPIKey(app, "split")
+	if err != nil {
+		t.Fatal(err)
+	}
+	key, err := s.Authenticate(context.Background(), secret)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// A second key that never makes a request, to pin the zero-count path.
+	idle, err := s.CreateAPIKey(app, "idle")
+	if err != nil {
+		t.Fatal(err)
+	}
+	idleKey, err := s.Authenticate(context.Background(), idle)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	base := gateway.Record{
+		KeyID: key.ID, KeyName: "split", Alias: "alias",
+		ProviderID: providerID, ProviderName: "prov", UpstreamModel: "gpt-x",
+	}
+	outcomes := []gateway.Outcome{
+		gateway.OutcomeCompleted,
+		gateway.OutcomeCompleted,
+		gateway.OutcomeCompleted,
+		gateway.OutcomeUpstreamError,
+		gateway.OutcomeClientDisconnected,
+		gateway.OutcomeRejected,
+	}
+	sink := NewLogSink(app)
+	for i, outcome := range outcomes {
+		rec := base
+		rec.Outcome = outcome
+		rec.Status = 200
+		if outcome != gateway.OutcomeCompleted {
+			rec.Status = 500
+		}
+		rec.StartedAt = testStartedAt.Add(time.Duration(i) * time.Second)
+		if err := sink.Write(context.Background(), rec); err != nil {
+			t.Fatalf("write log %d: %v", i, err)
+		}
+	}
+
+	// A completed request on a different key must not leak into the split's
+	// numbers, and last_used must come from the newest log.
+	other := base
+	other.KeyID = idleKey.ID
+	other.KeyName = "idle"
+	other.Outcome = gateway.OutcomeCompleted
+	other.Status = 200
+	other.StartedAt = testStartedAt.Add(time.Minute)
+	if err := sink.Write(context.Background(), other); err != nil {
+		t.Fatalf("write idle log: %v", err)
+	}
+
+	assertCounts := func(t *testing.T, collection, idField, id string, wantSuccess, wantFail int) {
+		t.Helper()
+		records, err := app.FindAllRecords(collection)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, rec := range records {
+			if rec.GetString(idField) != id {
+				continue
+			}
+			if got := rec.GetInt("success_requests"); got != wantSuccess {
+				t.Fatalf("%s: success_requests = %d, want %d", collection, got, wantSuccess)
+			}
+			if got := rec.GetInt("fail_requests"); got != wantFail {
+				t.Fatalf("%s: fail_requests = %d, want %d", collection, got, wantFail)
+			}
+			return
+		}
+		t.Fatalf("%s: no row for %s", collection, id)
+	}
+
+	routes, err := app.FindAllRecords("routes")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(routes) != 1 {
+		t.Fatalf("expected 1 route, got %d", len(routes))
+	}
+
+	// Providers and routes see every request regardless of key, so the idle
+	// key's extra success is included on top of the six split ones.
+	assertCounts(t, "api_keys_usage", "id", key.ID, 3, 3)
+	assertCounts(t, "api_keys_usage", "id", idleKey.ID, 1, 0)
+	assertCounts(t, "providers_usage", "id", providerID, 4, 3)
+	assertCounts(t, "routes_usage", "id", routes[0].Id, 4, 3)
+}
+
+func TestUsageViewsZeroCountsForUnusedRows(t *testing.T) {
+	app := newTestApp(t)
+	s, err := Open(app, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	providerID := seedConfig(t, app, s)
+
+	records, err := app.FindAllRecords("providers_usage")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(records) != 1 {
+		t.Fatalf("expected 1 provider usage row, got %d", len(records))
+	}
+	row := records[0]
+	if row.GetString("id") != providerID {
+		t.Fatalf("unexpected provider row %q", row.GetString("id"))
+	}
+	// No logs yet: zeroed counts, not NULL, and no last_used.
+	if got := row.GetInt("success_requests"); got != 0 {
+		t.Fatalf("success_requests = %d, want 0", got)
+	}
+	if got := row.GetInt("fail_requests"); got != 0 {
+		t.Fatalf("fail_requests = %d, want 0", got)
+	}
+	if got := row.GetString("last_used"); got != "null" {
+		t.Fatalf("last_used = %q, want NULL", got)
+	}
+}
+
+// There are no follow-up migrations, so a fresh install is the only place
+// createAll can silently drift from the deployed schema.
+func TestCreateAllProducesCurrentSchema(t *testing.T) {
+	app := newTestApp(t)
+
 	logs, err := app.FindCollectionByNameOrId("request_logs")
 	if err != nil {
 		t.Fatal(err)
 	}
-	logs.Fields.RemoveByName("outcome")
-	if err := app.Save(logs); err != nil {
-		t.Fatal(err)
+	if _, ok := logs.Fields.GetByName("started_at").(*core.DateField); !ok {
+		t.Fatalf("missing started_at DateField, got %#v", logs.Fields.GetByName("started_at"))
 	}
-	for range 2 {
-		if err := addRequestLogsOutcome(app); err != nil {
-			t.Fatalf("add request log outcome: %v", err)
+	outcome, ok := logs.Fields.GetByName("outcome").(*core.TextField)
+	if !ok || outcome.Max != 32 {
+		t.Fatalf("unexpected outcome field: %#v", logs.Fields.GetByName("outcome"))
+	}
+
+	for _, name := range []string{"providers", "api_keys", "routes", "transformers", settingsCollection} {
+		collection, err := app.FindCollectionByNameOrId(name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, field := range []string{"created", "updated"} {
+			if _, ok := collection.Fields.GetByName(field).(*core.AutodateField); !ok {
+				t.Fatalf("%s: missing %s AutodateField", name, field)
+			}
 		}
 	}
-	logs, err = app.FindCollectionByNameOrId("request_logs")
-	if err != nil {
+
+	// The split views must expose both counts and no longer the total.
+	for _, view := range usageViews {
+		for _, column := range []string{"success_requests", "fail_requests"} {
+			if _, err := app.DB().NewQuery(
+				"SELECT " + column + " FROM {{" + view.name + "}} LIMIT 1").Execute(); err != nil {
+				t.Fatalf("%s: expected column %s: %v", view.name, column, err)
+			}
+		}
+		if _, err := app.DB().NewQuery(
+			"SELECT total_requests FROM {{" + view.name + "}} LIMIT 1").Execute(); err == nil {
+			t.Fatalf("%s: total_requests should have been replaced by the split", view.name)
+		}
+	}
+
+	// One migration, always: a second would spread schema across files that
+	// existing databases can no longer be walked forward to.
+	var registered int
+	if err := app.DB().NewQuery(
+		"SELECT COUNT(*) FROM _migrations WHERE file LIKE '1800000000%'").
+		Row(&registered); err != nil {
 		t.Fatal(err)
 	}
-	field := logs.Fields.GetByName("outcome")
-	text, ok := field.(*core.TextField)
-	if !ok || text.Max != 32 {
-		t.Fatalf("unexpected outcome field: %#v", field)
+	if registered != 1 {
+		t.Fatalf("expected exactly one project migration, got %d", registered)
 	}
 }
 

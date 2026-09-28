@@ -9,16 +9,10 @@ import (
 )
 
 func init() {
-	// Initial schema for pre-publication databases, plus additive follow-up
-	// migrations. New columns always arrive via their own idempotent
-	// migration so live data survives upgrades; the single-migration
-	// wipe-and-reseed approach applies only to migrations older than the
-	// follow-ups still registered here.
+	// The name is the migration's primary key, not a label: renaming or
+	// re-dating it makes every existing database re-run createAll, which then
+	// fails on the duplicate collection names.
 	migrations.Register(createAll, nil, "1800000000_gateway.go")
-	migrations.Register(addRequestLogsStartedAt, nil, "1800000001_request_logs_started_at.go")
-	migrations.Register(addTimestamps, nil, "1800000002_timestamps.go")
-	migrations.Register(ensureUsageViews, nil, "1800000003_usage_views.go")
-	migrations.Register(addRequestLogsOutcome, nil, "1800000004_request_logs_outcome.go")
 }
 
 // buildSettingsCollection assembles the collection from the canonical schema
@@ -159,64 +153,11 @@ func createAll(app core.App) error {
 	return ensureUsageViews(app)
 }
 
-// addRequestLogsStartedAt persists the gateway-side request start time.
-// Idempotent: existing databases gain the column, fresh ones get it from
-// the chain, and rows logged before this migration keep started_at NULL.
-func addRequestLogsStartedAt(app core.App) error {
-	logs, err := app.FindCollectionByNameOrId("request_logs")
-	if err != nil {
-		return err
-	}
-	if logs.Fields.GetByName("started_at") != nil {
-		return nil
-	}
-	logs.Fields.Add(&core.DateField{Name: "started_at"})
-	return app.Save(logs)
-}
-
-func addRequestLogsOutcome(app core.App) error {
-	logs, err := app.FindCollectionByNameOrId("request_logs")
-	if err != nil {
-		return err
-	}
-	if logs.Fields.GetByName("outcome") != nil {
-		return nil
-	}
-	logs.Fields.Add(&core.TextField{Name: "outcome", Max: 32})
-	return app.Save(logs)
-}
-
-// addTimestamps backfills the dashboard-convention created/updated fields on
-// config collections. Idempotent; pre-existing rows keep empty values.
-func addTimestamps(app core.App) error {
-	for _, name := range []string{"providers", "api_keys", "routes", "transformers", settingsCollection} {
-		collection, err := app.FindCollectionByNameOrId(name)
-		if err != nil {
-			return err
-		}
-		changed := false
-		if collection.Fields.GetByName("created") == nil {
-			collection.Fields.Add(&core.AutodateField{Name: "created", OnCreate: true})
-			changed = true
-		}
-		if collection.Fields.GetByName("updated") == nil {
-			collection.Fields.Add(&core.AutodateField{Name: "updated", OnCreate: true, OnUpdate: true})
-			changed = true
-		}
-		if changed {
-			if err := app.Save(collection); err != nil {
-				return err
-			}
-		}
-	}
-	return nil
-}
-
 // usageViews backs the read-only last-usage collections. last_used prefers
 // the gateway-side started_at, falling back to the row-write created for
 // rows logged before started_at existed (NULLIF: unset dates store as empty
 // strings, which COALESCE alone would not skip). Unused rows stay NULL with
-// a zero count thanks to the LEFT JOIN.
+// zero counts thanks to the LEFT JOIN.
 var usageViews = []struct {
 	name  string
 	query string
@@ -225,7 +166,8 @@ var usageViews = []struct {
 		name: "api_keys_usage",
 		query: `SELECT k.id AS id, k.name AS name,` +
 			` MAX(COALESCE(NULLIF(l.started_at, ''), l.created)) AS last_used,` +
-			` COUNT(l.id) AS total_requests` +
+			` COUNT(CASE WHEN l.outcome = 'completed' THEN 1 END) AS success_requests,` +
+			` COUNT(CASE WHEN l.outcome <> 'completed' THEN 1 END) AS fail_requests` +
 			` FROM api_keys AS k LEFT JOIN request_logs AS l ON l.api_key = k.id` +
 			` GROUP BY k.id, k.name`,
 	},
@@ -233,7 +175,8 @@ var usageViews = []struct {
 		name: "providers_usage",
 		query: `SELECT p.id AS id, p.name AS name,` +
 			` MAX(COALESCE(NULLIF(l.started_at, ''), l.created)) AS last_used,` +
-			` COUNT(l.id) AS total_requests` +
+			` COUNT(CASE WHEN l.outcome = 'completed' THEN 1 END) AS success_requests,` +
+			` COUNT(CASE WHEN l.outcome <> 'completed' THEN 1 END) AS fail_requests` +
 			` FROM providers AS p LEFT JOIN request_logs AS l ON l.provider = p.id` +
 			` GROUP BY p.id, p.name`,
 	},
@@ -242,7 +185,8 @@ var usageViews = []struct {
 		query: `SELECT r.id AS id, r.alias AS alias, r.provider AS provider,` +
 			` r.upstream_model AS upstream_model,` +
 			` MAX(COALESCE(NULLIF(l.started_at, ''), l.created)) AS last_used,` +
-			` COUNT(l.id) AS total_requests` +
+			` COUNT(CASE WHEN l.outcome = 'completed' THEN 1 END) AS success_requests,` +
+			` COUNT(CASE WHEN l.outcome <> 'completed' THEN 1 END) AS fail_requests` +
 			` FROM routes AS r LEFT JOIN request_logs AS l` +
 			` ON l.alias = r.alias AND l.provider = r.provider AND l.upstream_model = r.upstream_model` +
 			` GROUP BY r.id, r.alias, r.provider, r.upstream_model`,
