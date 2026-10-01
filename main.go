@@ -1,9 +1,13 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"log/slog"
+	"maps"
 	"os"
+	"slices"
+	"strings"
 	"text/tabwriter"
 
 	"github.com/pocketbase/pocketbase"
@@ -41,6 +45,8 @@ func main() {
 			logs = logStore
 			proxy := gateway.New(config, logs, logger)
 			proxy.Capture = gwStore.CaptureEnabled
+			proxy.Tools = gwStore.Tools()
+			proxy.ToolLogs = store.NewToolLogSink(app)
 			if err := logStore.RegisterRetention(app, gwStore.RetentionCron(), gwStore.Retention); err != nil {
 				return err
 			}
@@ -48,6 +54,12 @@ func main() {
 				if err := logStore.UpdateSchedule(gwStore.RetentionCron()); err != nil {
 					logger.Error("invalid retention_cron, keeping previous schedule", "error", err)
 				}
+			})
+			// stdio servers are child processes; without this they would
+			// outlive the gateway.
+			app.OnTerminate().BindFunc(func(e *core.TerminateEvent) error {
+				gwStore.CloseMCP()
+				return e.Next()
 			})
 
 			e.Router.Any("/v1/{path...}", func(e *core.RequestEvent) error {
@@ -187,6 +199,143 @@ func main() {
 	})
 	routeCmd.AddCommand(routeImport)
 	app.RootCmd.AddCommand(routeCmd)
+
+	mcpCmd := &cobra.Command{
+		Use:   "mcp",
+		Short: "Manage MCP servers and tool approvals",
+	}
+	mcpCmd.AddCommand(&cobra.Command{
+		Use: "list", Args: cobra.NoArgs,
+		Short: "List MCP servers (never env or header values)",
+		RunE: withStore(func(cmds *Commands, _ []string) error {
+			servers, err := cmds.ListMCPServers()
+			if err != nil {
+				return err
+			}
+			w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
+			fmt.Fprintln(w, "NAME\tTRANSPORT\tTARGET\tENABLED\tSECRETS")
+			for _, s := range servers {
+				target := s.URL
+				if s.Transport == "stdio" {
+					target = strings.TrimSpace(s.Command + " " + strings.Join(s.Args, " "))
+				}
+				fmt.Fprintf(w, "%s\t%s\t%s\t%t\t%t\n", s.Name, s.Transport, target, s.Enabled, s.HasSecrets)
+			}
+			return w.Flush()
+		}),
+	})
+	mcpCmd.AddCommand(&cobra.Command{
+		Use: "tools <server>", Args: cobra.ExactArgs(1),
+		Short: "List a server's tools with approval status and definition hash",
+		RunE: withStore(func(cmds *Commands, args []string) error {
+			tools, err := cmds.ListMCPTools(context.Background(), args[0])
+			if err != nil {
+				return err
+			}
+			w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
+			fmt.Fprintln(w, "TOOL\tSTATUS\tCALLABLE\tDEFINITION_HASH")
+			for _, t := range tools {
+				fmt.Fprintf(w, "%s\t%s\t%t\t%s\n", t.Tool, t.Status, t.Status == "approved", t.Hash)
+			}
+			return w.Flush()
+		}),
+	})
+	mcpApprove := &cobra.Command{
+		Use: "approve <server> <tool> <hash>", Args: cobra.ExactArgs(3),
+		Short: "Approve a tool by pinning the definition hash you reviewed",
+		Long: "Approve a tool by pinning the definition hash you reviewed.\n\n" +
+			"Read the hash from `mcp tools <server>`. If the server redefines the tool\n" +
+			"later the hash stops matching and the tool is withheld from agents until it\n" +
+			"is approved again.",
+		RunE: withStore(func(cmds *Commands, args []string) error {
+			if err := cmds.ApproveMCPTool(context.Background(), args[0], args[1], args[2]); err != nil {
+				return err
+			}
+			fmt.Printf("approved %s/%s\n", args[0], args[1])
+			return nil
+		}),
+	}
+	mcpCmd.AddCommand(mcpApprove)
+	mcpCmd.AddCommand(&cobra.Command{
+		Use: "revoke <server> <tool>", Args: cobra.ExactArgs(2),
+		Short: "Revoke a tool approval",
+		RunE: withStore(func(cmds *Commands, args []string) error {
+			if err := cmds.RevokeMCPTool(args[0], args[1]); err != nil {
+				return err
+			}
+			fmt.Printf("revoked %s/%s\n", args[0], args[1])
+			return nil
+		}),
+	})
+	mcpCmd.AddCommand(&cobra.Command{
+		Use: "refresh <server>", Args: cobra.ExactArgs(1),
+		Short: "Reconnect and relist a server",
+		RunE: withStore(func(cmds *Commands, args []string) error {
+			if err := cmds.RefreshMCPServer(args[0]); err != nil {
+				return err
+			}
+			fmt.Printf("refreshed %s\n", args[0])
+			return nil
+		}),
+	})
+	mcpCmd.AddCommand(&cobra.Command{
+		Use: "reveal <server>", Args: cobra.ExactArgs(1),
+		Short: "Decrypt and print a server's env and header values",
+		RunE: withStore(func(cmds *Commands, args []string) error {
+			secrets, err := cmds.RevealMCPSecrets(args[0])
+			if err != nil {
+				return err
+			}
+			w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
+			fmt.Fprintln(w, "FIELD\tVALUE")
+			for _, field := range slices.Sorted(maps.Keys(secrets)) {
+				fmt.Fprintf(w, "%s\t%s\n", field, secrets[field])
+			}
+			return w.Flush()
+		}),
+	})
+	app.RootCmd.AddCommand(mcpCmd)
+
+	toolCmd := &cobra.Command{
+		Use:   "tool",
+		Short: "Manage conduit tools",
+	}
+	toolCmd.AddCommand(&cobra.Command{
+		Use: "list", Args: cobra.NoArgs,
+		Short: "List conduit tools and whether they are enabled",
+		RunE: withStore(func(cmds *Commands, _ []string) error {
+			tools, err := cmds.ListTools()
+			if err != nil {
+				return err
+			}
+			w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
+			fmt.Fprintln(w, "NAME\tENABLED\tVALID\tDESCRIPTION")
+			for _, t := range tools {
+				description := t.Description
+				if len(description) > 60 {
+					description = description[:57] + "..."
+				}
+				fmt.Fprintf(w, "%s\t%t\t%t\t%s\n", t.Name, t.Enabled, !t.Invalid, description)
+			}
+			return w.Flush()
+		}),
+	})
+	toolCmd.AddCommand(&cobra.Command{
+		Use: "validate <file>", Args: cobra.ExactArgs(1),
+		Short: "Check a conduit definition without saving it",
+		RunE: withStore(func(cmds *Commands, args []string) error {
+			data, err := os.ReadFile(args[0])
+			if err != nil {
+				return err
+			}
+			if err := cmds.ValidateTool(data); err != nil {
+				return err
+			}
+			fmt.Println("valid")
+			return nil
+		}),
+	})
+	app.RootCmd.AddCommand(toolCmd)
 
 	if err := app.Start(); err != nil {
 		logger.Error("fatal", "error", err)

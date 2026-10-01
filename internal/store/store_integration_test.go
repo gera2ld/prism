@@ -511,16 +511,31 @@ func TestCreateAllProducesCurrentSchema(t *testing.T) {
 		}
 	}
 
-	// One migration, always: a second would spread schema across files that
-	// existing databases can no longer be walked forward to.
-	var registered int
+	// The schema is walked forward by these migrations in order and nothing
+	// else: a fresh install must reach the deployed shape without a
+	// hand-patched database.
+	var migrations []struct {
+		File string `db:"file"`
+	}
 	if err := app.DB().NewQuery(
-		"SELECT COUNT(*) FROM _migrations WHERE file LIKE '1800000000%'").
-		Row(&registered); err != nil {
+		"SELECT file FROM _migrations WHERE file LIKE '18000000%' ORDER BY file").
+		All(&migrations); err != nil {
 		t.Fatal(err)
 	}
-	if registered != 1 {
-		t.Fatalf("expected exactly one project migration, got %d", registered)
+	want := []string{"1800000000_gateway.go", "1800000001_tools.go"}
+	if len(migrations) != len(want) {
+		t.Fatalf("expected project migrations %v, got %v", want, migrations)
+	}
+	for i, name := range want {
+		if migrations[i].File != name {
+			t.Fatalf("migration %d = %q, want %q (all: %v)", i, migrations[i].File, name, migrations)
+		}
+	}
+
+	// The tools surface's own view is registered by the second migration,
+	// because tool_logs does not exist yet when createAll runs.
+	if _, err := app.FindCollectionByNameOrId("tools_usage"); err != nil {
+		t.Fatalf("tools_usage view: %v", err)
 	}
 }
 

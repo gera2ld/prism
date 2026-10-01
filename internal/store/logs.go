@@ -125,6 +125,13 @@ func (l *LogStore) retentionJob(app core.App) func() {
 		_, _ = app.DB().NewQuery("DELETE FROM {{request_bodies}} WHERE [[created]] < {:cutoff}").
 			Bind(dbx.Params{"cutoff": cutoff}).
 			Execute()
+		// Tool invocations keep their row for the same reason chat requests do:
+		// the count and the outcome are history. Only the captured payload ages
+		// out, so it is cleared rather than the row deleted.
+		_, _ = app.DB().NewQuery(
+			"UPDATE {{tool_logs}} SET [[arguments]] = '', [[result]] = '' WHERE [[created]] < {:cutoff}").
+			Bind(dbx.Params{"cutoff": cutoff}).
+			Execute()
 	}
 }
 

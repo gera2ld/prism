@@ -21,8 +21,11 @@ const (
 )
 
 type Proxy struct {
-	Config  Config
-	Logs    LogSink
+	Config   Config
+	Logs     LogSink
+	ToolLogs ToolLogSink
+	// Tools resolves and executes tool calls. Nil disables the tools surface.
+	Tools   ToolRegistry
 	Client  *http.Client
 	Now     func() time.Time
 	Capture func() bool
@@ -46,6 +49,9 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		p.handleModels(w, r)
 	case r.URL.Path == chatPath && r.Method == http.MethodPost:
 		p.handleChat(w, r)
+	case r.URL.Path == toolsPath && r.Method == http.MethodGet:
+		p.handleTools(w, r)
+	case p.serveToolInvoke(w, r):
 	default:
 		http.NotFound(w, r)
 	}

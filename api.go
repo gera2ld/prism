@@ -12,6 +12,7 @@ import (
 	"github.com/danielgtaylor/huma/v2/adapters/humago"
 	"github.com/pocketbase/pocketbase/core"
 
+	"github.com/gera2ld/prism/internal/gateway"
 	"github.com/gera2ld/prism/internal/store"
 )
 
@@ -233,9 +234,203 @@ func newPrismMux(app core.App, s *store.Store) *http.ServeMux {
 		return &struct{}{}, nil
 	})
 
+	registerToolAPI(api, cmds)
 	registerLLMDocs(api)
 
 	return mux
+}
+
+// registerToolAPI exposes the operator half of the tools surface: the MCP
+// server registry, the per-tool approval ledger, and the conduit tool list.
+// The agent-facing half lives on /v1 and is documented in llm_docs.go.
+func registerToolAPI(api huma.API, cmds *Commands) {
+	huma.Register(api, huma.Operation{
+		OperationID: "list-mcp-servers",
+		Method:      http.MethodGet,
+		Path:        prismAPIPrefix + "/mcp-servers",
+		Summary:     "List MCP servers",
+		Description: "Names, transports and endpoints only; env and header values are never included.",
+		Tags:        []string{"mcp"},
+		Security:    superuserSecurity,
+	}, func(ctx context.Context, _ *struct{}) (*struct {
+		Body []store.MCPServerInfo
+	}, error) {
+		servers, err := cmds.ListMCPServers()
+		if err != nil {
+			return nil, huma.Error500InternalServerError("list mcp servers failed", err)
+		}
+		return &struct {
+			Body []store.MCPServerInfo
+		}{Body: servers}, nil
+	})
+
+	huma.Register(api, huma.Operation{
+		OperationID: "reveal-mcp-secrets",
+		Method:      http.MethodGet,
+		Path:        prismAPIPrefix + "/mcp-servers/{name}/reveal",
+		Summary:     "Reveal an MCP server's secrets",
+		Description: "Decrypts the stored env and header values. Neither is ever used for authentication; both are outbound credentials the gateway presents to the server.",
+		Tags:        []string{"mcp"},
+		Security:    superuserSecurity,
+	}, func(ctx context.Context, input *struct {
+		Name string `path:"name" doc:"MCP server name"`
+	}) (*struct {
+		Body struct {
+			Secrets map[string]string `json:"secrets" doc:"Keys are prefixed with env. or headers."`
+		}
+	}, error) {
+		secrets, err := cmds.RevealMCPSecrets(input.Name)
+		if err != nil {
+			return nil, storeError(err)
+		}
+		out := &struct {
+			Body struct {
+				Secrets map[string]string `json:"secrets" doc:"Keys are prefixed with env. or headers."`
+			}
+		}{}
+		out.Body.Secrets = secrets
+		return out, nil
+	})
+
+	huma.Register(api, huma.Operation{
+		OperationID: "list-mcp-tools",
+		Method:      http.MethodGet,
+		Path:        prismAPIPrefix + "/mcp-servers/{name}/tools",
+		Summary:     "List an MCP server's tools and their approval state",
+		Description: "Connects to the server and returns every tool it publishes, each with the definition hash an approval would be pinned to. Status is unapproved, approved, changed (approved under an older hash, so withheld from agents) or orphaned (approved but no longer published). Nothing is exposed to an agent until approved.",
+		Tags:        []string{"mcp"},
+		Security:    superuserSecurity,
+	}, func(ctx context.Context, input *struct {
+		Name string `path:"name" doc:"MCP server name"`
+	}) (*struct {
+		Body []store.MCPToolView
+	}, error) {
+		tools, err := cmds.ListMCPTools(ctx, input.Name)
+		if err != nil {
+			return nil, storeError(err)
+		}
+		return &struct {
+			Body []store.MCPToolView
+		}{Body: tools}, nil
+	})
+
+	huma.Register(api, huma.Operation{
+		OperationID: "approve-mcp-tool",
+		Method:      http.MethodPost,
+		Path:        prismAPIPrefix + "/mcp-servers/{name}/tools/{tool}/approve",
+		Summary:     "Approve an MCP tool",
+		Description: "Pins the tool's current definition hash, which is what makes it callable. The reviewed hash is required and must still match what the server publishes, so a definition that changed after review is refused with 409 instead of being approved by accident.",
+		Tags:        []string{"mcp"},
+		Security:    superuserSecurity,
+	}, func(ctx context.Context, input *struct {
+		Name string `path:"name" doc:"MCP server name"`
+		Tool string `path:"tool" doc:"Tool name as the server publishes it"`
+		Body struct {
+			DefinitionHash string `json:"definition_hash" minLength:"64" maxLength:"64" doc:"The hash read from the tool list, being approved"`
+		}
+	}) (*struct{}, error) {
+		if err := cmds.ApproveMCPTool(ctx, input.Name, input.Tool, input.Body.DefinitionHash); err != nil {
+			return nil, toolApprovalError(err)
+		}
+		return &struct{}{}, nil
+	})
+
+	huma.Register(api, huma.Operation{
+		OperationID: "revoke-mcp-tool",
+		Method:      http.MethodDelete,
+		Path:        prismAPIPrefix + "/mcp-servers/{name}/tools/{tool}/approve",
+		Summary:     "Revoke an MCP tool approval",
+		Description: "Removes the approval, hiding the tool from agents again. The definition hash is forgotten, so re-approving later requires a fresh review.",
+		Tags:        []string{"mcp"},
+		Security:    superuserSecurity,
+	}, func(ctx context.Context, input *struct {
+		Name string `path:"name" doc:"MCP server name"`
+		Tool string `path:"tool" doc:"Tool name as the server publishes it"`
+	}) (*struct{}, error) {
+		if err := cmds.RevokeMCPTool(input.Name, input.Tool); err != nil {
+			return nil, storeError(err)
+		}
+		return &struct{}{}, nil
+	})
+
+	huma.Register(api, huma.Operation{
+		OperationID: "refresh-mcp-server",
+		Method:      http.MethodPost,
+		Path:        prismAPIPrefix + "/mcp-servers/{name}/refresh",
+		Summary:     "Reconnect and relist an MCP server",
+		Description: "Drops the live session so the next use redials and re-reads the tool list. The escape hatch for a server that changed its tools without sending a tools/list_changed notification.",
+		Tags:        []string{"mcp"},
+		Security:    superuserSecurity,
+	}, func(ctx context.Context, input *struct {
+		Name string `path:"name" doc:"MCP server name"`
+	}) (*struct{}, error) {
+		if err := cmds.RefreshMCPServer(input.Name); err != nil {
+			return nil, storeError(err)
+		}
+		return &struct{}{}, nil
+	})
+
+	huma.Register(api, huma.Operation{
+		OperationID: "list-tools",
+		Method:      http.MethodGet,
+		Path:        prismAPIPrefix + "/tools",
+		Summary:     "List conduit tools",
+		Description: "Operator-authored tools built from conduit definitions, enabled or not. Description and input schema are derived from the definition, so they cannot disagree with it.",
+		Tags:        []string{"tools"},
+		Security:    superuserSecurity,
+	}, func(ctx context.Context, _ *struct{}) (*struct {
+		Body []store.ConduitToolInfo
+	}, error) {
+		tools, err := cmds.ListTools()
+		if err != nil {
+			return nil, huma.Error500InternalServerError("list tools failed", err)
+		}
+		return &struct {
+			Body []store.ConduitToolInfo
+		}{Body: tools}, nil
+	})
+
+	huma.Register(api, huma.Operation{
+		OperationID: "validate-tool",
+		Method:      http.MethodPost,
+		Path:        prismAPIPrefix + "/tools/validate",
+		Summary:     "Validate a conduit definition",
+		Description: "Parses a definition and reports what the agent would be shown, without saving anything. The same check runs when a tool is saved.",
+		Tags:        []string{"tools"},
+		Security:    superuserSecurity,
+	}, func(ctx context.Context, input *struct {
+		Body struct {
+			Definition string `json:"definition" minLength:"1" doc:"Conduit definition as YAML or JSON"`
+		}
+	}) (*struct {
+		Body struct {
+			Valid bool `json:"valid"`
+		}
+	}, error) {
+		if err := cmds.ValidateTool([]byte(input.Body.Definition)); err != nil {
+			return nil, huma.Error400BadRequest("invalid conduit definition", err)
+		}
+		out := &struct {
+			Body struct {
+				Valid bool `json:"valid"`
+			}
+		}{}
+		out.Body.Valid = true
+		return out, nil
+	})
+}
+
+// toolApprovalError maps approval failures to statuses. A stale hash is a
+// conflict, not a bad request: the request was well formed, but the definition
+// it referred to is no longer what the server publishes.
+func toolApprovalError(err error) error {
+	if errors.Is(err, store.ErrApprovalStale) {
+		return huma.Error409Conflict("tool definition changed since it was reviewed", err)
+	}
+	if errors.Is(err, gateway.ErrUnknownTool) {
+		return huma.Error404NotFound("no such tool on that server", err)
+	}
+	return huma.Error500InternalServerError("approve tool failed", err)
 }
 
 // storeError maps store failures to HTTP status: unknown names are 404,

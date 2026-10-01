@@ -110,8 +110,32 @@ var gatewayErrorSchema = objProp("Gateway error envelope.", nil, map[string]*hum
 	"error": objProp("Error detail.", nil, map[string]*huma.Schema{
 		"message": strProp("Human-readable message."),
 		"type":    strProp("Always invalid_request_error."),
-		"code":    strProp("Machine-readable code, e.g. invalid_api_key, unknown_model, forbidden, upstream_error."),
+		"code":    strProp("Machine-readable code, e.g. invalid_api_key, unknown_model, unknown_tool, forbidden, upstream_error."),
 	}),
+})
+
+var toolsResponseSchema = objProp("Tools this key may call, in OpenAI's tool shape.", nil, map[string]*huma.Schema{
+	"object": strProp("Always list."),
+	"data": {Type: "array", Description: "Callable tools. MCP tools appear only while approved under a hash that still matches the server's current definition.", Items: objProp("One callable tool.", nil, map[string]*huma.Schema{
+		"id":   strProp("Same as function.name; makes the listing addressable."),
+		"type": strProp("Always function."),
+		"function": objProp("The tool as the model sees it.", []string{"name"}, map[string]*huma.Schema{
+			"name":        strProp("Name to call, e.g. mcp__github__create_issue for a namespaced MCP tool."),
+			"description": strProp("What the tool does, from the tool's own definition."),
+			"parameters":  {Type: "object", Description: "JSON Schema for the arguments. Absent when the tool publishes no schema.", AdditionalProperties: true},
+		}),
+	})},
+})
+
+var invokeRequestSchema = objProp("Arguments for one tool call.", nil, map[string]*huma.Schema{
+	"arguments": {Type: "object", Description: "Arguments matching the tool's schema. Omit or pass null for a tool that takes none.", AdditionalProperties: true},
+})
+
+var invokeResponseSchema = objProp("The outcome of one tool call.", nil, map[string]*huma.Schema{
+	"object":   strProp("Always tool.result."),
+	"tool":     strProp("Name that was invoked."),
+	"is_error": boolProp("The tool ran and failed; result carries the reason. Still a 200, so an agent can feed it back as a tool message."),
+	"result":   {Description: "The tool's output: whatever JSON value its definition produced, or the text an MCP tool returned. Null when the tool returned nothing."},
 })
 
 func gatewayErrorResponses() map[string]*huma.Response {
@@ -179,6 +203,64 @@ func registerLLMDocs(api huma.API) {
 					Description: "Usable aliases.",
 					Content: map[string]*huma.MediaType{
 						"application/json": {Schema: modelsResponseSchema},
+					},
+				}
+				return responses
+			}(),
+		},
+	}
+	registerToolDocs(openAPI)
+}
+
+// registerToolDocs documents the tools surface an agent drives. Prism does not
+// run the agent's loop: it lists the tools it may call and executes one on
+// request, which keeps the gateway a pass-through for chat and leaves the loop
+// to the client.
+func registerToolDocs(openAPI *huma.OpenAPI) {
+	openAPI.Paths["/v1/tools"] = &huma.PathItem{
+		Get: &huma.Operation{
+			OperationID: "list-tools",
+			Summary:     "List callable tools",
+			Description: "The tools this key may call, in OpenAI's tool shape so the array can be handed straight to a chat request's tools field.\n\n" +
+				"MCP tools are disabled until individually approved, and each approval is pinned to a hash of the tool's definition: if the server changes a tool, its description or its schema, the hash stops matching and the tool disappears from this list until it is approved again. A tool the key may not call is simply absent.",
+			Tags:     []string{"tools"},
+			Security: clientKeySecurity,
+			Responses: func() map[string]*huma.Response {
+				responses := gatewayErrorResponses()
+				responses["200"] = &huma.Response{
+					Description: "Callable tools.",
+					Content: map[string]*huma.MediaType{
+						"application/json": {Schema: toolsResponseSchema},
+					},
+				}
+				return responses
+			}(),
+		},
+	}
+	openAPI.Paths["/v1/tools/{name}/invoke"] = &huma.PathItem{
+		Post: &huma.Operation{
+			OperationID: "invoke-tool",
+			Summary:     "Invoke a tool",
+			Description: "Runs one tool and returns its output.\n\n" +
+				"A tool that ran and failed is still a 200 with is_error true and the reason in result, because an agent needs to read that and correct itself. Only a gateway-level fault, or a name that is not callable, is a non-200.",
+			Tags:     []string{"tools"},
+			Security: clientKeySecurity,
+			RequestBody: &huma.RequestBody{
+				Required: true,
+				Content: map[string]*huma.MediaType{
+					"application/json": {Schema: invokeRequestSchema},
+				},
+			},
+			Responses: func() map[string]*huma.Response {
+				responses := gatewayErrorResponses()
+				responses["404"] = &huma.Response{
+					Description: "No callable tool by that name.",
+					Content:     map[string]*huma.MediaType{"application/json": {Schema: gatewayErrorSchema}},
+				}
+				responses["200"] = &huma.Response{
+					Description: "The tool's output.",
+					Content: map[string]*huma.MediaType{
+						"application/json": {Schema: invokeResponseSchema},
 					},
 				}
 				return responses
