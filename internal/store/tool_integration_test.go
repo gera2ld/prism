@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"sync"
 	"testing"
@@ -221,6 +223,95 @@ func TestValidateConduitDefinition(t *testing.T) {
 	}
 	if err := ValidateConduitDefinition([]byte("   ")); err == nil {
 		t.Fatal("expected a blank definition to be rejected")
+	}
+}
+
+// A conduit request must identify itself: Go sends no User-Agent unless one is
+// set, and public APIs answer an unidentified client with a bare 403.
+func TestConduitSendsDefaultUserAgent(t *testing.T) {
+	var seen http.Header
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		seen = r.Header.Clone()
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"summary":"clear"}`))
+	}))
+	defer server.Close()
+
+	definition := `
+name: probe
+description: probe
+steps:
+  - id: call
+    url: '"` + server.URL + `/weather"'
+output_transform: 'steps.call'
+`
+	app := newTestApp(t)
+	s, err := Open(app, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	saveRecord(t, app, toolsCollection, map[string]any{
+		"name": "probe", "definition": definition, "enabled": true,
+	})
+
+	result, err := s.Tools().Invoke(context.Background(), gateway.Key{}, "probe", json.RawMessage(`{}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.IsError {
+		t.Fatalf("probe failed: %#v", result.Result)
+	}
+	if got := seen.Get("User-Agent"); got != "Prism/"+Version {
+		t.Fatalf("User-Agent = %q, want %q", got, "Prism/"+Version)
+	}
+}
+
+func TestConduitStepHeaderOverridesDefault(t *testing.T) {
+	var seen http.Header
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		seen = r.Header.Clone()
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"summary":"clear"}`))
+	}))
+	defer server.Close()
+
+	// A step that wants to identify itself differently still can: the engine
+	// resolves step headers over the run-level defaults.
+	definition := `
+name: probe
+description: probe
+steps:
+  - id: call
+    url: '"` + server.URL + `/weather"'
+    headers:
+      User-Agent: '"my-tool/9"'
+output_transform: 'steps.call'
+`
+	app := newTestApp(t)
+	s, err := Open(app, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	saveRecord(t, app, toolsCollection, map[string]any{
+		"name": "probe", "definition": definition, "enabled": true,
+	})
+
+	if _, err := s.Tools().Invoke(context.Background(), gateway.Key{}, "probe", json.RawMessage(`{}`)); err != nil {
+		t.Fatal(err)
+	}
+	if got := seen.Get("User-Agent"); got != "my-tool/9" {
+		t.Fatalf("User-Agent = %q, want the step's own value", got)
+	}
+}
+
+// The default is a bare Name/version token, because some public APIs reject the
+// conventional "App/1.0 (contact)" form for containing parentheses or an @.
+func TestDefaultUserAgentAvoidsBlockedCharacters(t *testing.T) {
+	for _, forbidden := range []string{"(", ")", "@"} {
+		if strings.Contains(defaultConduitHeaders["User-Agent"], forbidden) {
+			t.Fatalf("default User-Agent %q contains %q, which some APIs reject",
+				defaultConduitHeaders["User-Agent"], forbidden)
+		}
 	}
 }
 

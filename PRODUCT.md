@@ -222,6 +222,14 @@ names are pattern-constrained so they cannot collide with the `mcp__` prefix.
 before running. So publishing one is the whole job. Definitions are parsed at save time and an
 uncompilable one is rejected, so bad YAML, unknown methods and duplicate step ids never persist.
 
+Every outbound request carries a default `Prism/<version>` User-Agent. Go's HTTP client sends
+none unless one is set, and public APIs answer an unidentified client with a bare 403 and no
+explanation — Nominatim is the example that prompted this. The value is deliberately a bare
+`Name/version` token: the conventional `App/1.0 (contact)` form gets *rejected* by the same
+APIs, for containing parentheses or an `@`, so adding contact details at the gateway level would
+introduce a failure. A step's own headers still win, so a definition that needs richer
+identification sets it where it is written.
+
 **MCP tools are disabled by default.** They are third-party code I do not control, so they get
 two gates rather than one flag:
 

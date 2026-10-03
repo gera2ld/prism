@@ -4,7 +4,7 @@ go 1.27.1
 
 require (
 	github.com/danielgtaylor/huma/v2 v2.39.1
-	github.com/gera2ld/conduit/packages/conduit-go v0.2.1
+	github.com/gera2ld/conduit/packages/conduit-go v0.2.2
 	github.com/modelcontextprotocol/go-sdk v1.8.0
 	github.com/pocketbase/dbx v1.12.0
 	github.com/pocketbase/pocketbase v0.40.4

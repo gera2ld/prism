@@ -29,11 +29,28 @@ type conduitRegistry struct {
 	// cache is shared across runs so a definition's cache_ttl persists between
 	// invocations, which is the documented way to use it.
 	cache *conduitgo.Cache
+	// headers are sent on every request the engine makes. Injectable so a test
+	// can observe them.
+	headers map[string]string
 
 	mu     sync.Mutex
 	tools  []conduitTool
 	loaded bool
 }
+
+// Version identifies Prism to the systems it calls.
+const Version = "1.0.0"
+
+// defaultConduitHeaders go on every outbound request a conduit tool makes.
+//
+// Go's HTTP client sends no User-Agent at all unless one is set, and plenty of
+// public APIs refuse an unidentified client — Nominatim answers 403 with "Access
+// denied" and no further detail. The value is a bare Name/version token on
+// purpose: some of those APIs also reject the conventional "App/1.0 (contact)"
+// form for containing parentheses or an @, so adding contact details here would
+// get the request blocked instead. A step's own headers still win, so a tool
+// that wants richer identification can say so where it is written.
+var defaultConduitHeaders = map[string]string{"User-Agent": "Prism/" + Version}
 
 type conduitTool struct {
 	name   string
@@ -45,7 +62,12 @@ func newConduitRegistry(app core.App, logger *slog.Logger) *conduitRegistry {
 	if logger == nil {
 		logger = slog.Default()
 	}
-	return &conduitRegistry{app: app, logger: logger, cache: conduitgo.NewCache()}
+	return &conduitRegistry{
+		app:     app,
+		logger:  logger,
+		cache:   conduitgo.NewCache(),
+		headers: defaultConduitHeaders,
+	}
 }
 
 func (r *conduitRegistry) Invalidate() {
@@ -96,7 +118,10 @@ func (r *conduitRegistry) Call(ctx context.Context, name string, args json.RawMe
 		}
 	}
 
-	out, err := conduitgo.Run(ctx, tools[idx].def, input, conduitgo.Options{Cache: r.cache})
+	out, err := conduitgo.Run(ctx, tools[idx].def, input, conduitgo.Options{
+		Cache:   r.cache,
+		Headers: r.headers,
+	})
 	if err != nil {
 		return failed(err.Error()), nil
 	}

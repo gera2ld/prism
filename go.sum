@@ -31,6 +31,8 @@ github.com/ganigeorgiev/fexpr v0.6.0 h1:Fza3O/QMBKEudUvxV862qe6GjxM60GJjjKytdp+V
 github.com/ganigeorgiev/fexpr v0.6.0/go.mod h1:RyGiGqmeXhEQ6+mlGdnUleLHgtzzu/VGO2WtJkF5drE=
 github.com/gera2ld/conduit/packages/conduit-go v0.2.1 h1:EtRj1w/yq6LRSok0Mp10Png85rcLmKDkUFUj4H3uC+M=
 github.com/gera2ld/conduit/packages/conduit-go v0.2.1/go.mod h1:8PLl/WpgzSW+t8kLrEN9q52795uqZxxzFTSrVZKKyz8=
+github.com/gera2ld/conduit/packages/conduit-go v0.2.2 h1:EAr9+d2oK27oCDhneMi6NrxqUGHavRivWvMxtCM7Bf0=
+github.com/gera2ld/conduit/packages/conduit-go v0.2.2/go.mod h1:8PLl/WpgzSW+t8kLrEN9q52795uqZxxzFTSrVZKKyz8=
 github.com/go-chi/chi/v5 v5.3.1 h1:3j4HZLGZQ3JpMCrPJF/Jl3mYJfWLKBfNJ6quurUGCf8=
 github.com/go-chi/chi/v5 v5.3.1/go.mod h1:R+tYY2hNuVUUjxoPtqUdgBqevM9s9njzkTLutVsOCto=
 github.com/go-sql-driver/mysql v1.4.1 h1:g24URVg0OFbNUTx9qqY1IRZ9D9z3iPyi5zKhQZpNwpA=

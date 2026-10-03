@@ -88,7 +88,9 @@ There are two kinds of tool:
 - **Your own**, built from a [conduit](https://github.com/gera2ld/conduit) definition —
   a declarative YAML/JSON document describing HTTP calls. The document supplies the
   name, description and argument schema, and the engine validates arguments before
-  running. Add one to the `tools` collection; `enabled` is the only switch.
+  running. Add one to the `tools` collection; `enabled` is the only switch. Requests
+  carry a `Prism/<version>` User-Agent, since Go sends none by default and many public
+  APIs reject an unidentified client — a step's own `headers` override it.
 - **An MCP server's**, which the server publishes. See below.
 
 ### MCP servers
