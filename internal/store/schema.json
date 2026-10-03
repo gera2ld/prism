@@ -1,0 +1,1466 @@
+[
+  {
+    "fields": [
+      {
+        "autogeneratePattern": "[a-z0-9]{15}",
+        "help": "",
+        "hidden": false,
+        "id": "text3208210256",
+        "max": 15,
+        "min": 15,
+        "name": "id",
+        "pattern": "^[a-z0-9]+$",
+        "presentable": false,
+        "primaryKey": true,
+        "required": true,
+        "system": true,
+        "type": "text"
+      },
+      {
+        "hidden": false,
+        "id": "autodate2990389176",
+        "name": "created",
+        "onCreate": true,
+        "onUpdate": false,
+        "presentable": false,
+        "system": false,
+        "type": "autodate"
+      },
+      {
+        "hidden": false,
+        "id": "autodate3332085495",
+        "name": "updated",
+        "onCreate": true,
+        "onUpdate": true,
+        "presentable": false,
+        "system": false,
+        "type": "autodate"
+      },
+      {
+        "autogeneratePattern": "",
+        "help": "",
+        "hidden": false,
+        "id": "text1579384326",
+        "max": 0,
+        "min": 0,
+        "name": "name",
+        "pattern": "",
+        "presentable": false,
+        "primaryKey": false,
+        "required": true,
+        "system": false,
+        "type": "text"
+      },
+      {
+        "autogeneratePattern": "",
+        "help": "",
+        "hidden": true,
+        "id": "text1472182641",
+        "max": 0,
+        "min": 0,
+        "name": "key_hash",
+        "pattern": "^[a-f0-9]{64}$",
+        "presentable": false,
+        "primaryKey": false,
+        "required": false,
+        "system": false,
+        "type": "text"
+      },
+      {
+        "autogeneratePattern": "",
+        "help": "",
+        "hidden": true,
+        "id": "text4213055232",
+        "max": 256,
+        "min": 0,
+        "name": "key_plain",
+        "pattern": "",
+        "presentable": false,
+        "primaryKey": false,
+        "required": false,
+        "system": false,
+        "type": "text"
+      },
+      {
+        "help": "",
+        "hidden": false,
+        "id": "bool1358543748",
+        "name": "enabled",
+        "presentable": false,
+        "required": false,
+        "system": false,
+        "type": "bool"
+      },
+      {
+        "autogeneratePattern": "",
+        "help": "Optional RE2 whitelist on the client model value. Empty allows all.",
+        "hidden": false,
+        "id": "text2668469929",
+        "max": 256,
+        "min": 0,
+        "name": "alias_pattern",
+        "pattern": "",
+        "presentable": false,
+        "primaryKey": false,
+        "required": false,
+        "system": false,
+        "type": "text"
+      },
+      {
+        "autogeneratePattern": "",
+        "help": "Optional RE2 whitelist on the resolved provider name. Empty allows all.",
+        "hidden": false,
+        "id": "text1407475241",
+        "max": 256,
+        "min": 0,
+        "name": "provider_pattern",
+        "pattern": "",
+        "presentable": false,
+        "primaryKey": false,
+        "required": false,
+        "system": false,
+        "type": "text"
+      },
+      {
+        "autogeneratePattern": "",
+        "help": "Optional RE2 whitelist on the upstream model. Empty allows all.",
+        "hidden": false,
+        "id": "text3274675583",
+        "max": 256,
+        "min": 0,
+        "name": "model_pattern",
+        "pattern": "",
+        "presentable": false,
+        "primaryKey": false,
+        "required": false,
+        "system": false,
+        "type": "text"
+      }
+    ],
+    "id": "pbc_3577178630",
+    "indexes": [
+      "CREATE UNIQUE INDEX `idx_api_keys_hash` ON `api_keys` (key_hash)"
+    ],
+    "name": "api_keys",
+    "type": "base"
+  },
+  {
+    "id": "pbc_603960570",
+    "name": "api_keys_usage",
+    "type": "view",
+    "viewQuery": "SELECT k.id AS id, k.name AS name, MAX(COALESCE(NULLIF(l.started_at, ''), l.created)) AS last_used, COUNT(CASE WHEN l.outcome = 'completed' THEN 1 END) AS success_requests, COUNT(CASE WHEN l.outcome \u003c\u003e 'completed' THEN 1 END) AS fail_requests FROM api_keys AS k LEFT JOIN request_logs AS l ON l.api_key = k.id GROUP BY k.id, k.name"
+  },
+  {
+    "fields": [
+      {
+        "autogeneratePattern": "[a-z0-9]{15}",
+        "help": "",
+        "hidden": false,
+        "id": "text3208210256",
+        "max": 15,
+        "min": 15,
+        "name": "id",
+        "pattern": "^[a-z0-9]+$",
+        "presentable": false,
+        "primaryKey": true,
+        "required": true,
+        "system": true,
+        "type": "text"
+      },
+      {
+        "hidden": false,
+        "id": "autodate2990389176",
+        "name": "created",
+        "onCreate": true,
+        "onUpdate": false,
+        "presentable": false,
+        "system": false,
+        "type": "autodate"
+      },
+      {
+        "hidden": false,
+        "id": "autodate3332085495",
+        "name": "updated",
+        "onCreate": true,
+        "onUpdate": true,
+        "presentable": false,
+        "system": false,
+        "type": "autodate"
+      },
+      {
+        "help": "",
+        "hidden": false,
+        "id": "bool1743422263",
+        "name": "capture_bodies",
+        "presentable": false,
+        "required": false,
+        "system": false,
+        "type": "bool"
+      },
+      {
+        "help": "",
+        "hidden": false,
+        "id": "number3584646826",
+        "max": null,
+        "min": null,
+        "name": "retention_hours",
+        "onlyInt": true,
+        "presentable": false,
+        "required": true,
+        "system": false,
+        "type": "number"
+      },
+      {
+        "autogeneratePattern": "",
+        "help": "",
+        "hidden": false,
+        "id": "text2712022977",
+        "max": 64,
+        "min": 0,
+        "name": "retention_cron",
+        "pattern": "",
+        "presentable": false,
+        "primaryKey": false,
+        "required": true,
+        "system": false,
+        "type": "text"
+      }
+    ],
+    "id": "pbc_3421386208",
+    "indexes": [],
+    "name": "gateway_settings",
+    "type": "base"
+  },
+  {
+    "fields": [
+      {
+        "autogeneratePattern": "[a-z0-9]{15}",
+        "help": "",
+        "hidden": false,
+        "id": "text3208210256",
+        "max": 15,
+        "min": 15,
+        "name": "id",
+        "pattern": "^[a-z0-9]+$",
+        "presentable": false,
+        "primaryKey": true,
+        "required": true,
+        "system": true,
+        "type": "text"
+      },
+      {
+        "hidden": false,
+        "id": "autodate2990389176",
+        "name": "created",
+        "onCreate": true,
+        "onUpdate": false,
+        "presentable": false,
+        "system": false,
+        "type": "autodate"
+      },
+      {
+        "hidden": false,
+        "id": "autodate3332085495",
+        "name": "updated",
+        "onCreate": true,
+        "onUpdate": true,
+        "presentable": false,
+        "system": false,
+        "type": "autodate"
+      },
+      {
+        "autogeneratePattern": "",
+        "help": "",
+        "hidden": false,
+        "id": "text1579384326",
+        "max": 0,
+        "min": 0,
+        "name": "name",
+        "pattern": "^[a-zA-Z0-9_-]+$",
+        "presentable": false,
+        "primaryKey": false,
+        "required": true,
+        "system": false,
+        "type": "text"
+      },
+      {
+        "exceptDomains": [],
+        "help": "",
+        "hidden": false,
+        "id": "url2651864036",
+        "name": "base_url",
+        "onlyDomains": [],
+        "presentable": false,
+        "required": true,
+        "system": false,
+        "type": "url"
+      },
+      {
+        "autogeneratePattern": "",
+        "help": "",
+        "hidden": true,
+        "id": "text3373460893",
+        "max": 16384,
+        "min": 0,
+        "name": "api_key",
+        "pattern": "",
+        "presentable": false,
+        "primaryKey": false,
+        "required": false,
+        "system": false,
+        "type": "text"
+      },
+      {
+        "help": "",
+        "hidden": false,
+        "id": "bool1358543748",
+        "name": "enabled",
+        "presentable": false,
+        "required": false,
+        "system": false,
+        "type": "bool"
+      }
+    ],
+    "id": "pbc_2249077391",
+    "indexes": [
+      "CREATE UNIQUE INDEX `idx_providers_name` ON `providers` (name)"
+    ],
+    "name": "providers",
+    "type": "base"
+  },
+  {
+    "id": "pbc_1462387306",
+    "name": "providers_usage",
+    "type": "view",
+    "viewQuery": "SELECT p.id AS id, p.name AS name, MAX(COALESCE(NULLIF(l.started_at, ''), l.created)) AS last_used, COUNT(CASE WHEN l.outcome = 'completed' THEN 1 END) AS success_requests, COUNT(CASE WHEN l.outcome \u003c\u003e 'completed' THEN 1 END) AS fail_requests FROM providers AS p LEFT JOIN request_logs AS l ON l.provider = p.id GROUP BY p.id, p.name"
+  },
+  {
+    "fields": [
+      {
+        "autogeneratePattern": "[a-z0-9]{15}",
+        "help": "",
+        "hidden": false,
+        "id": "text3208210256",
+        "max": 15,
+        "min": 15,
+        "name": "id",
+        "pattern": "^[a-z0-9]+$",
+        "presentable": false,
+        "primaryKey": true,
+        "required": true,
+        "system": true,
+        "type": "text"
+      },
+      {
+        "hidden": false,
+        "id": "autodate2990389176",
+        "name": "created",
+        "onCreate": true,
+        "onUpdate": false,
+        "presentable": false,
+        "system": false,
+        "type": "autodate"
+      },
+      {
+        "cascadeDelete": true,
+        "collectionId": "pbc_3635455392",
+        "help": "",
+        "hidden": false,
+        "id": "relation2403297477",
+        "maxSelect": 0,
+        "minSelect": 0,
+        "name": "log",
+        "presentable": false,
+        "required": true,
+        "system": false,
+        "type": "relation"
+      },
+      {
+        "autogeneratePattern": "",
+        "help": "",
+        "hidden": false,
+        "id": "text999788447",
+        "max": 262144,
+        "min": 0,
+        "name": "request",
+        "pattern": "",
+        "presentable": false,
+        "primaryKey": false,
+        "required": false,
+        "system": false,
+        "type": "text"
+      },
+      {
+        "autogeneratePattern": "",
+        "help": "",
+        "hidden": false,
+        "id": "text1048251387",
+        "max": 262144,
+        "min": 0,
+        "name": "response",
+        "pattern": "",
+        "presentable": false,
+        "primaryKey": false,
+        "required": false,
+        "system": false,
+        "type": "text"
+      },
+      {
+        "help": "",
+        "hidden": false,
+        "id": "bool1966663400",
+        "name": "truncated",
+        "presentable": false,
+        "required": false,
+        "system": false,
+        "type": "bool"
+      }
+    ],
+    "id": "pbc_2716497565",
+    "indexes": [
+      "CREATE UNIQUE INDEX `idx_request_bodies_log` ON `request_bodies` (log)",
+      "CREATE INDEX `idx_request_bodies_created` ON `request_bodies` (created)"
+    ],
+    "name": "request_bodies",
+    "type": "base"
+  },
+  {
+    "fields": [
+      {
+        "autogeneratePattern": "[a-z0-9]{15}",
+        "help": "",
+        "hidden": false,
+        "id": "text3208210256",
+        "max": 15,
+        "min": 15,
+        "name": "id",
+        "pattern": "^[a-z0-9]+$",
+        "presentable": false,
+        "primaryKey": true,
+        "required": true,
+        "system": true,
+        "type": "text"
+      },
+      {
+        "hidden": false,
+        "id": "autodate2990389176",
+        "name": "created",
+        "onCreate": true,
+        "onUpdate": false,
+        "presentable": false,
+        "system": false,
+        "type": "autodate"
+      },
+      {
+        "help": "",
+        "hidden": false,
+        "id": "date222754019",
+        "max": "",
+        "min": "",
+        "name": "started_at",
+        "presentable": false,
+        "required": false,
+        "system": false,
+        "type": "date"
+      },
+      {
+        "cascadeDelete": false,
+        "collectionId": "pbc_3577178630",
+        "help": "",
+        "hidden": false,
+        "id": "relation3373460893",
+        "maxSelect": 0,
+        "minSelect": 0,
+        "name": "api_key",
+        "presentable": false,
+        "required": false,
+        "system": false,
+        "type": "relation"
+      },
+      {
+        "autogeneratePattern": "",
+        "help": "",
+        "hidden": false,
+        "id": "text186609472",
+        "max": 0,
+        "min": 0,
+        "name": "api_key_name",
+        "pattern": "",
+        "presentable": false,
+        "primaryKey": false,
+        "required": false,
+        "system": false,
+        "type": "text"
+      },
+      {
+        "autogeneratePattern": "",
+        "help": "",
+        "hidden": false,
+        "id": "text3781979028",
+        "max": 0,
+        "min": 0,
+        "name": "alias",
+        "pattern": "",
+        "presentable": false,
+        "primaryKey": false,
+        "required": false,
+        "system": false,
+        "type": "text"
+      },
+      {
+        "cascadeDelete": false,
+        "collectionId": "pbc_2249077391",
+        "help": "",
+        "hidden": false,
+        "id": "relation2462348188",
+        "maxSelect": 1,
+        "minSelect": 0,
+        "name": "provider",
+        "presentable": false,
+        "required": false,
+        "system": false,
+        "type": "relation"
+      },
+      {
+        "autogeneratePattern": "",
+        "help": "",
+        "hidden": false,
+        "id": "text3148553594",
+        "max": 0,
+        "min": 0,
+        "name": "provider_name",
+        "pattern": "",
+        "presentable": false,
+        "primaryKey": false,
+        "required": false,
+        "system": false,
+        "type": "text"
+      },
+      {
+        "autogeneratePattern": "",
+        "help": "",
+        "hidden": false,
+        "id": "text3870001590",
+        "max": 0,
+        "min": 0,
+        "name": "upstream_model",
+        "pattern": "",
+        "presentable": false,
+        "primaryKey": false,
+        "required": false,
+        "system": false,
+        "type": "text"
+      },
+      {
+        "autogeneratePattern": "",
+        "help": "",
+        "hidden": false,
+        "id": "text1716427693",
+        "max": 256,
+        "min": 0,
+        "name": "transformer",
+        "pattern": "",
+        "presentable": false,
+        "primaryKey": false,
+        "required": false,
+        "system": false,
+        "type": "text"
+      },
+      {
+        "help": "",
+        "hidden": false,
+        "id": "bool4041850396",
+        "name": "stream",
+        "presentable": false,
+        "required": false,
+        "system": false,
+        "type": "bool"
+      },
+      {
+        "help": "",
+        "hidden": false,
+        "id": "json2356723103",
+        "maxSize": 32,
+        "name": "prompt_tokens",
+        "presentable": false,
+        "required": false,
+        "system": false,
+        "type": "json"
+      },
+      {
+        "help": "",
+        "hidden": false,
+        "id": "json3312136409",
+        "maxSize": 32,
+        "name": "completion_tokens",
+        "presentable": false,
+        "required": false,
+        "system": false,
+        "type": "json"
+      },
+      {
+        "help": "",
+        "hidden": false,
+        "id": "json1649291928",
+        "maxSize": 32,
+        "name": "total_tokens",
+        "presentable": false,
+        "required": false,
+        "system": false,
+        "type": "json"
+      },
+      {
+        "help": "",
+        "hidden": false,
+        "id": "json2297177873",
+        "maxSize": 32,
+        "name": "cached_tokens",
+        "presentable": false,
+        "required": false,
+        "system": false,
+        "type": "json"
+      },
+      {
+        "help": "",
+        "hidden": false,
+        "id": "json2573765974",
+        "maxSize": 32,
+        "name": "ttft_ms",
+        "presentable": false,
+        "required": false,
+        "system": false,
+        "type": "json"
+      },
+      {
+        "help": "",
+        "hidden": false,
+        "id": "number191396223",
+        "max": null,
+        "min": null,
+        "name": "total_ms",
+        "onlyInt": true,
+        "presentable": false,
+        "required": false,
+        "system": false,
+        "type": "number"
+      },
+      {
+        "help": "",
+        "hidden": false,
+        "id": "number2063623452",
+        "max": null,
+        "min": null,
+        "name": "status",
+        "onlyInt": true,
+        "presentable": false,
+        "required": false,
+        "system": false,
+        "type": "number"
+      },
+      {
+        "autogeneratePattern": "",
+        "help": "",
+        "hidden": false,
+        "id": "text1574812785",
+        "max": 0,
+        "min": 0,
+        "name": "error",
+        "pattern": "",
+        "presentable": false,
+        "primaryKey": false,
+        "required": false,
+        "system": false,
+        "type": "text"
+      },
+      {
+        "autogeneratePattern": "",
+        "help": "",
+        "hidden": false,
+        "id": "text817655234",
+        "max": 32,
+        "min": 0,
+        "name": "outcome",
+        "pattern": "",
+        "presentable": false,
+        "primaryKey": false,
+        "required": false,
+        "system": false,
+        "type": "text"
+      },
+      {
+        "autogeneratePattern": "",
+        "help": "",
+        "hidden": false,
+        "id": "text2920182771",
+        "max": 64,
+        "min": 0,
+        "name": "finish_reason",
+        "pattern": "",
+        "presentable": false,
+        "primaryKey": false,
+        "required": false,
+        "system": false,
+        "type": "text"
+      }
+    ],
+    "id": "pbc_3635455392",
+    "indexes": [
+      "CREATE INDEX `idx_request_logs_created` ON `request_logs` (created)"
+    ],
+    "name": "request_logs",
+    "type": "base"
+  },
+  {
+    "fields": [
+      {
+        "autogeneratePattern": "[a-z0-9]{15}",
+        "help": "",
+        "hidden": false,
+        "id": "text3208210256",
+        "max": 15,
+        "min": 15,
+        "name": "id",
+        "pattern": "^[a-z0-9]+$",
+        "presentable": false,
+        "primaryKey": true,
+        "required": true,
+        "system": true,
+        "type": "text"
+      },
+      {
+        "hidden": false,
+        "id": "autodate2990389176",
+        "name": "created",
+        "onCreate": true,
+        "onUpdate": false,
+        "presentable": false,
+        "system": false,
+        "type": "autodate"
+      },
+      {
+        "hidden": false,
+        "id": "autodate3332085495",
+        "name": "updated",
+        "onCreate": true,
+        "onUpdate": true,
+        "presentable": false,
+        "system": false,
+        "type": "autodate"
+      },
+      {
+        "autogeneratePattern": "",
+        "help": "",
+        "hidden": false,
+        "id": "text3781979028",
+        "max": 0,
+        "min": 0,
+        "name": "alias",
+        "pattern": "^[^\\s]+$",
+        "presentable": false,
+        "primaryKey": false,
+        "required": true,
+        "system": false,
+        "type": "text"
+      },
+      {
+        "cascadeDelete": true,
+        "collectionId": "pbc_2249077391",
+        "help": "",
+        "hidden": false,
+        "id": "relation2462348188",
+        "maxSelect": 0,
+        "minSelect": 0,
+        "name": "provider",
+        "presentable": false,
+        "required": true,
+        "system": false,
+        "type": "relation"
+      },
+      {
+        "autogeneratePattern": "",
+        "help": "",
+        "hidden": false,
+        "id": "text3870001590",
+        "max": 0,
+        "min": 0,
+        "name": "upstream_model",
+        "pattern": "",
+        "presentable": false,
+        "primaryKey": false,
+        "required": true,
+        "system": false,
+        "type": "text"
+      },
+      {
+        "help": "",
+        "hidden": false,
+        "id": "number1655102503",
+        "max": null,
+        "min": null,
+        "name": "priority",
+        "onlyInt": true,
+        "presentable": false,
+        "required": false,
+        "system": false,
+        "type": "number"
+      },
+      {
+        "help": "",
+        "hidden": false,
+        "id": "bool1358543748",
+        "name": "enabled",
+        "presentable": false,
+        "required": false,
+        "system": false,
+        "type": "bool"
+      }
+    ],
+    "id": "pbc_96911357",
+    "indexes": [
+      "CREATE INDEX `idx_routes_alias_priority` ON `routes` (alias, priority)"
+    ],
+    "name": "routes",
+    "type": "base"
+  },
+  {
+    "id": "pbc_2198965770",
+    "name": "routes_usage",
+    "type": "view",
+    "viewQuery": "SELECT r.id AS id, r.alias AS alias, r.provider AS provider, r.upstream_model AS upstream_model, MAX(COALESCE(NULLIF(l.started_at, ''), l.created)) AS last_used, COUNT(CASE WHEN l.outcome = 'completed' THEN 1 END) AS success_requests, COUNT(CASE WHEN l.outcome \u003c\u003e 'completed' THEN 1 END) AS fail_requests FROM routes AS r LEFT JOIN request_logs AS l ON l.alias = r.alias AND l.provider = r.provider AND l.upstream_model = r.upstream_model GROUP BY r.id, r.alias, r.provider, r.upstream_model"
+  },
+  {
+    "fields": [
+      {
+        "autogeneratePattern": "[a-z0-9]{15}",
+        "help": "",
+        "hidden": false,
+        "id": "text3208210256",
+        "max": 15,
+        "min": 15,
+        "name": "id",
+        "pattern": "^[a-z0-9]+$",
+        "presentable": false,
+        "primaryKey": true,
+        "required": true,
+        "system": true,
+        "type": "text"
+      },
+      {
+        "hidden": false,
+        "id": "autodate2990389176",
+        "name": "created",
+        "onCreate": true,
+        "onUpdate": false,
+        "presentable": false,
+        "system": false,
+        "type": "autodate"
+      },
+      {
+        "help": "",
+        "hidden": false,
+        "id": "date222754019",
+        "max": "",
+        "min": "",
+        "name": "started_at",
+        "presentable": false,
+        "required": false,
+        "system": false,
+        "type": "date"
+      },
+      {
+        "cascadeDelete": false,
+        "collectionId": "pbc_3577178630",
+        "help": "",
+        "hidden": false,
+        "id": "relation3373460893",
+        "maxSelect": 1,
+        "minSelect": 0,
+        "name": "api_key",
+        "presentable": false,
+        "required": false,
+        "system": false,
+        "type": "relation"
+      },
+      {
+        "autogeneratePattern": "",
+        "help": "",
+        "hidden": false,
+        "id": "text186609472",
+        "max": 0,
+        "min": 0,
+        "name": "api_key_name",
+        "pattern": "",
+        "presentable": false,
+        "primaryKey": false,
+        "required": false,
+        "system": false,
+        "type": "text"
+      },
+      {
+        "autogeneratePattern": "",
+        "help": "",
+        "hidden": false,
+        "id": "text552812241",
+        "max": 128,
+        "min": 0,
+        "name": "tool",
+        "pattern": "",
+        "presentable": false,
+        "primaryKey": false,
+        "required": false,
+        "system": false,
+        "type": "text"
+      },
+      {
+        "autogeneratePattern": "",
+        "help": "rest or mcp.",
+        "hidden": false,
+        "id": "text1722491182",
+        "max": 32,
+        "min": 0,
+        "name": "transport",
+        "pattern": "",
+        "presentable": false,
+        "primaryKey": false,
+        "required": false,
+        "system": false,
+        "type": "text"
+      },
+      {
+        "autogeneratePattern": "",
+        "help": "",
+        "hidden": false,
+        "id": "text4225120046",
+        "max": 262144,
+        "min": 0,
+        "name": "arguments",
+        "pattern": "",
+        "presentable": false,
+        "primaryKey": false,
+        "required": false,
+        "system": false,
+        "type": "text"
+      },
+      {
+        "autogeneratePattern": "",
+        "help": "",
+        "hidden": false,
+        "id": "text325763347",
+        "max": 262144,
+        "min": 0,
+        "name": "result",
+        "pattern": "",
+        "presentable": false,
+        "primaryKey": false,
+        "required": false,
+        "system": false,
+        "type": "text"
+      },
+      {
+        "help": "",
+        "hidden": false,
+        "id": "bool1966663400",
+        "name": "truncated",
+        "presentable": false,
+        "required": false,
+        "system": false,
+        "type": "bool"
+      },
+      {
+        "help": "",
+        "hidden": false,
+        "id": "number3490105115",
+        "max": null,
+        "min": null,
+        "name": "duration_ms",
+        "onlyInt": true,
+        "presentable": false,
+        "required": false,
+        "system": false,
+        "type": "number"
+      },
+      {
+        "help": "",
+        "hidden": false,
+        "id": "number2063623452",
+        "max": null,
+        "min": null,
+        "name": "status",
+        "onlyInt": true,
+        "presentable": false,
+        "required": false,
+        "system": false,
+        "type": "number"
+      },
+      {
+        "autogeneratePattern": "",
+        "help": "",
+        "hidden": false,
+        "id": "text817655234",
+        "max": 32,
+        "min": 0,
+        "name": "outcome",
+        "pattern": "",
+        "presentable": false,
+        "primaryKey": false,
+        "required": false,
+        "system": false,
+        "type": "text"
+      },
+      {
+        "autogeneratePattern": "",
+        "help": "",
+        "hidden": false,
+        "id": "text1574812785",
+        "max": 0,
+        "min": 0,
+        "name": "error",
+        "pattern": "",
+        "presentable": false,
+        "primaryKey": false,
+        "required": false,
+        "system": false,
+        "type": "text"
+      }
+    ],
+    "id": "pbc_1340498063",
+    "indexes": [
+      "CREATE INDEX `idx_tool_logs_created` ON `tool_logs` (created)",
+      "CREATE INDEX `idx_tool_logs_tool` ON `tool_logs` (tool)"
+    ],
+    "name": "tool_logs",
+    "type": "base"
+  },
+  {
+    "fields": [
+      {
+        "autogeneratePattern": "[a-z0-9]{15}",
+        "help": "",
+        "hidden": false,
+        "id": "text3208210256",
+        "max": 15,
+        "min": 15,
+        "name": "id",
+        "pattern": "^[a-z0-9]+$",
+        "presentable": false,
+        "primaryKey": true,
+        "required": true,
+        "system": true,
+        "type": "text"
+      },
+      {
+        "hidden": false,
+        "id": "autodate2990389176",
+        "name": "created",
+        "onCreate": true,
+        "onUpdate": false,
+        "presentable": false,
+        "system": false,
+        "type": "autodate"
+      },
+      {
+        "hidden": false,
+        "id": "autodate3332085495",
+        "name": "updated",
+        "onCreate": true,
+        "onUpdate": true,
+        "presentable": false,
+        "system": false,
+        "type": "autodate"
+      },
+      {
+        "autogeneratePattern": "",
+        "help": "The name the agent calls.",
+        "hidden": false,
+        "id": "text1579384326",
+        "max": 0,
+        "min": 0,
+        "name": "name",
+        "pattern": "^[a-zA-Z0-9_-]{1,64}$",
+        "presentable": false,
+        "primaryKey": false,
+        "required": true,
+        "system": false,
+        "type": "text"
+      },
+      {
+        "autogeneratePattern": "",
+        "help": "Conduit definition (YAML or JSON).",
+        "hidden": false,
+        "id": "text1747988440",
+        "max": 131072,
+        "min": 0,
+        "name": "definition",
+        "pattern": "",
+        "presentable": false,
+        "primaryKey": false,
+        "required": true,
+        "system": false,
+        "type": "text"
+      },
+      {
+        "help": "",
+        "hidden": false,
+        "id": "bool1358543748",
+        "name": "enabled",
+        "presentable": false,
+        "required": false,
+        "system": false,
+        "type": "bool"
+      }
+    ],
+    "id": "pbc_565993628",
+    "indexes": [
+      "CREATE UNIQUE INDEX `idx_tools_name` ON `tools` (name)"
+    ],
+    "name": "tools",
+    "type": "base"
+  },
+  {
+    "id": "pbc_3471319058",
+    "name": "tools_usage",
+    "type": "view",
+    "viewQuery": "SELECT l.tool AS id, l.tool AS tool, l.transport AS transport, MAX(COALESCE(NULLIF(l.started_at, ''), l.created)) AS last_used, COUNT(CASE WHEN l.outcome = 'completed' THEN 1 END) AS success_requests, COUNT(CASE WHEN l.outcome \u003c\u003e 'completed' THEN 1 END) AS fail_requests FROM tool_logs AS l GROUP BY l.tool, l.transport"
+  },
+  {
+    "fields": [
+      {
+        "autogeneratePattern": "[a-z0-9]{15}",
+        "help": "",
+        "hidden": false,
+        "id": "text3208210256",
+        "max": 15,
+        "min": 15,
+        "name": "id",
+        "pattern": "^[a-z0-9]+$",
+        "presentable": false,
+        "primaryKey": true,
+        "required": true,
+        "system": true,
+        "type": "text"
+      },
+      {
+        "hidden": false,
+        "id": "autodate2990389176",
+        "name": "created",
+        "onCreate": true,
+        "onUpdate": false,
+        "presentable": false,
+        "system": false,
+        "type": "autodate"
+      },
+      {
+        "hidden": false,
+        "id": "autodate3332085495",
+        "name": "updated",
+        "onCreate": true,
+        "onUpdate": true,
+        "presentable": false,
+        "system": false,
+        "type": "autodate"
+      },
+      {
+        "autogeneratePattern": "",
+        "help": "",
+        "hidden": false,
+        "id": "text1579384326",
+        "max": 0,
+        "min": 0,
+        "name": "name",
+        "pattern": "",
+        "presentable": false,
+        "primaryKey": false,
+        "required": true,
+        "system": false,
+        "type": "text"
+      },
+      {
+        "cascadeDelete": true,
+        "collectionId": "pbc_2249077391",
+        "help": "",
+        "hidden": false,
+        "id": "relation2462348188",
+        "maxSelect": 0,
+        "minSelect": 0,
+        "name": "provider",
+        "presentable": false,
+        "required": true,
+        "system": false,
+        "type": "relation"
+      },
+      {
+        "autogeneratePattern": "",
+        "help": "RE2 regexp on the upstream model (unanchored): ^gpt-4 for prefix, ^model$ for exact.",
+        "hidden": false,
+        "id": "text3274675583",
+        "max": 256,
+        "min": 0,
+        "name": "model_pattern",
+        "pattern": "",
+        "presentable": false,
+        "primaryKey": false,
+        "required": true,
+        "system": false,
+        "type": "text"
+      },
+      {
+        "help": "",
+        "hidden": false,
+        "id": "number1655102503",
+        "max": null,
+        "min": null,
+        "name": "priority",
+        "onlyInt": true,
+        "presentable": false,
+        "required": false,
+        "system": false,
+        "type": "number"
+      },
+      {
+        "help": "",
+        "hidden": false,
+        "id": "bool1358543748",
+        "name": "enabled",
+        "presentable": false,
+        "required": false,
+        "system": false,
+        "type": "bool"
+      },
+      {
+        "autogeneratePattern": "",
+        "help": "JSONata producing the new request body object.",
+        "hidden": false,
+        "id": "text3627046401",
+        "max": 16384,
+        "min": 0,
+        "name": "expression",
+        "pattern": "",
+        "presentable": false,
+        "primaryKey": false,
+        "required": true,
+        "system": false,
+        "type": "text"
+      }
+    ],
+    "id": "pbc_3835108035",
+    "indexes": [
+      "CREATE UNIQUE INDEX `idx_transformers_name` ON `transformers` (name)",
+      "CREATE INDEX `idx_transformers_provider_priority` ON `transformers` (provider, priority)"
+    ],
+    "name": "transformers",
+    "type": "base"
+  },
+  {
+    "authAlert": {
+      "emailTemplate": {
+        "body": "\u003cp\u003eHello,\u003c/p\u003e\n\u003cp\u003eWe noticed a login to your {APP_NAME} account from a new location:\u003c/p\u003e\n\u003cp\u003e\u003cem\u003e{ALERT_INFO}\u003c/em\u003e\u003c/p\u003e\n\u003cp\u003e\u003cstrong\u003eIf this wasn't you, you should immediately change your {APP_NAME} account password to revoke access from all other locations.\u003c/strong\u003e\u003c/p\u003e\n\u003cp\u003eIf this was you, you may disregard this email.\u003c/p\u003e\n\u003cp\u003e\n  Thanks,\u003cbr/\u003e\n  {APP_NAME} team\n\u003c/p\u003e",
+        "subject": "Login from a new location"
+      },
+      "enabled": true
+    },
+    "authRule": "",
+    "authToken": {
+      "duration": 432000
+    },
+    "confirmEmailChangeTemplate": {
+      "body": "\u003cp\u003eHello,\u003c/p\u003e\n\u003cp\u003eClick on the button below to confirm your new email address.\u003c/p\u003e\n\u003cp\u003e\n  \u003ca class=\"btn\" href=\"{APP_URL}/_/#/auth/confirm-email-change/{TOKEN}\" target=\"_blank\" rel=\"noopener\"\u003eConfirm new email\u003c/a\u003e\n\u003c/p\u003e\n\u003cp\u003e\u003ci\u003eIf you didn't ask to change your email address, please ignore this email.\u003c/i\u003e\u003c/p\u003e\n\u003cp\u003e\n  Thanks,\u003cbr/\u003e\n  {APP_NAME} team\n\u003c/p\u003e",
+      "subject": "Confirm your {APP_NAME} new email address"
+    },
+    "createRule": "",
+    "deleteRule": "id = @request.auth.id",
+    "emailChangeToken": {
+      "duration": 1800
+    },
+    "fields": [
+      {
+        "autogeneratePattern": "[a-z0-9]{15}",
+        "help": "",
+        "hidden": false,
+        "id": "text3208210256",
+        "max": 15,
+        "min": 15,
+        "name": "id",
+        "pattern": "^[a-z0-9]+$",
+        "presentable": false,
+        "primaryKey": true,
+        "required": true,
+        "system": true,
+        "type": "text"
+      },
+      {
+        "cost": 0,
+        "help": "",
+        "hidden": true,
+        "id": "password901924565",
+        "max": 0,
+        "min": 8,
+        "name": "password",
+        "pattern": "",
+        "presentable": false,
+        "required": true,
+        "system": true,
+        "type": "password"
+      },
+      {
+        "autogeneratePattern": "[a-zA-Z0-9]{50}",
+        "help": "",
+        "hidden": true,
+        "id": "text2504183744",
+        "max": 60,
+        "min": 30,
+        "name": "tokenKey",
+        "pattern": "",
+        "presentable": false,
+        "primaryKey": false,
+        "required": true,
+        "system": true,
+        "type": "text"
+      },
+      {
+        "exceptDomains": [],
+        "help": "",
+        "hidden": false,
+        "id": "email3885137012",
+        "name": "email",
+        "onlyDomains": [],
+        "presentable": false,
+        "required": true,
+        "system": true,
+        "type": "email"
+      },
+      {
+        "help": "",
+        "hidden": false,
+        "id": "bool1547992806",
+        "name": "emailVisibility",
+        "presentable": false,
+        "required": false,
+        "system": true,
+        "type": "bool"
+      },
+      {
+        "help": "",
+        "hidden": false,
+        "id": "bool256245529",
+        "name": "verified",
+        "presentable": false,
+        "required": false,
+        "system": true,
+        "type": "bool"
+      },
+      {
+        "autogeneratePattern": "",
+        "help": "",
+        "hidden": false,
+        "id": "text1579384326",
+        "max": 255,
+        "min": 0,
+        "name": "name",
+        "pattern": "",
+        "presentable": false,
+        "primaryKey": false,
+        "required": false,
+        "system": false,
+        "type": "text"
+      },
+      {
+        "help": "",
+        "hidden": false,
+        "id": "file376926767",
+        "maxSelect": 1,
+        "maxSize": 0,
+        "mimeTypes": [
+          "image/jpeg",
+          "image/png",
+          "image/svg+xml",
+          "image/gif",
+          "image/webp"
+        ],
+        "name": "avatar",
+        "presentable": false,
+        "protected": false,
+        "required": false,
+        "system": false,
+        "thumbs": [],
+        "type": "file"
+      },
+      {
+        "hidden": false,
+        "id": "autodate2990389176",
+        "name": "created",
+        "onCreate": true,
+        "onUpdate": false,
+        "presentable": false,
+        "system": false,
+        "type": "autodate"
+      },
+      {
+        "hidden": false,
+        "id": "autodate3332085495",
+        "name": "updated",
+        "onCreate": true,
+        "onUpdate": true,
+        "presentable": false,
+        "system": false,
+        "type": "autodate"
+      }
+    ],
+    "fileToken": {
+      "duration": 180
+    },
+    "id": "_pb_users_auth_",
+    "indexes": [
+      "CREATE UNIQUE INDEX `idx_tokenKey__pb_users_auth_` ON `users` (`tokenKey`)",
+      "CREATE UNIQUE INDEX `idx_email__pb_users_auth_` ON `users` (`email`) WHERE `email` != ''"
+    ],
+    "listRule": "id = @request.auth.id",
+    "mfa": {
+      "duration": 600,
+      "enabled": false,
+      "rule": ""
+    },
+    "name": "users",
+    "oauth2": {
+      "enabled": false,
+      "mappedFields": {
+        "avatarURL": "avatar",
+        "id": "",
+        "name": "name",
+        "username": ""
+      },
+      "providers": []
+    },
+    "otp": {
+      "duration": 180,
+      "emailTemplate": {
+        "body": "\u003cp\u003eHello,\u003c/p\u003e\n\u003cp\u003eYour one-time password is: \u003cstrong\u003e{OTP}\u003c/strong\u003e\u003c/p\u003e\n\u003cp\u003e\u003ci\u003eIf you didn't ask for the one-time password, you can ignore this email.\u003c/i\u003e\u003c/p\u003e\n\u003cp\u003e\n  Thanks,\u003cbr/\u003e\n  {APP_NAME} team\n\u003c/p\u003e",
+        "subject": "OTP for {APP_NAME}"
+      },
+      "enabled": false,
+      "length": 8
+    },
+    "passwordAuth": {
+      "enabled": true,
+      "identityFields": [
+        "email"
+      ]
+    },
+    "passwordResetToken": {
+      "duration": 1800
+    },
+    "resetPasswordTemplate": {
+      "body": "\u003cp\u003eHello,\u003c/p\u003e\n\u003cp\u003eClick on the button below to reset your password.\u003c/p\u003e\n\u003cp\u003e\n  \u003ca class=\"btn\" href=\"{APP_URL}/_/#/auth/confirm-password-reset/{TOKEN}\" target=\"_blank\" rel=\"noopener\"\u003eReset password\u003c/a\u003e\n\u003c/p\u003e\n\u003cp\u003e\u003ci\u003eIf you didn't ask to reset your password, please ignore this email.\u003c/i\u003e\u003c/p\u003e\n\u003cp\u003e\n  Thanks,\u003cbr/\u003e\n  {APP_NAME} team\n\u003c/p\u003e",
+      "subject": "Reset your {APP_NAME} password"
+    },
+    "type": "auth",
+    "updateRule": "id = @request.auth.id",
+    "verificationTemplate": {
+      "body": "\u003cp\u003eHello,\u003c/p\u003e\n\u003cp\u003eThank you for joining us at {APP_NAME}.\u003c/p\u003e\n\u003cp\u003eClick on the button below to verify your email address.\u003c/p\u003e\n\u003cp\u003e\n  \u003ca class=\"btn\" href=\"{APP_URL}/_/#/auth/confirm-verification/{TOKEN}\" target=\"_blank\" rel=\"noopener\"\u003eVerify\u003c/a\u003e\n\u003c/p\u003e\n\u003cp\u003e\u003ci\u003eIf you didn't recently register, please ignore this email.\u003c/i\u003e\u003c/p\u003e\n\u003cp\u003e\n  Thanks,\u003cbr/\u003e\n  {APP_NAME} team\n\u003c/p\u003e",
+      "subject": "Verify your {APP_NAME} email"
+    },
+    "verificationToken": {
+      "duration": 86400
+    },
+    "viewRule": "id = @request.auth.id"
+  }
+]

@@ -1,7 +1,6 @@
 package store
 
 import (
-	"log/slog"
 	"strings"
 
 	"github.com/pocketbase/pocketbase/core"
@@ -53,71 +52,6 @@ func (s Settings) normalized() Settings {
 	return s
 }
 
-// settingsFields is the collection schema, in creation order. created/updated
-// follow the PocketBase dashboard convention so config rows are auditable.
-func settingsFields() []func() core.Field {
-	return []func() core.Field{
-		func() core.Field { return &core.AutodateField{Name: "created", OnCreate: true} },
-		func() core.Field {
-			return &core.AutodateField{Name: "updated", OnCreate: true, OnUpdate: true}
-		},
-		func() core.Field { return &core.BoolField{Name: fieldCaptureBodies} },
-		func() core.Field {
-			return &core.NumberField{Name: fieldRetentionHours, OnlyInt: true, Required: true}
-		},
-		func() core.Field {
-			return &core.TextField{Name: fieldRetentionCron, Required: true, Max: 64}
-		},
-	}
-}
-
-// ensureSettingsCollection finds the collection, creating it when missing.
-func ensureSettingsCollection(app core.App) (*core.Collection, error) {
-	if collection, err := app.FindCollectionByNameOrId(settingsCollection); err == nil {
-		return collection, nil
-	}
-	collection := core.NewBaseCollection(settingsCollection)
-	for _, makeField := range settingsFields() {
-		collection.Fields.Add(makeField())
-	}
-	if err := app.Save(collection); err != nil {
-		return nil, err
-	}
-	return app.FindCollectionByNameOrId(settingsCollection)
-}
-
-// reconcileSettingsFields adds missing field definitions and removes unknown
-// non-system ones left over from older versions. Returns whether the
-// collection was saved. log must be non-nil.
-func reconcileSettingsFields(app core.App, collection *core.Collection, log *slog.Logger) (bool, error) {
-	known := make(map[string]bool, len(settingsFields()))
-	changed := false
-	for _, makeField := range settingsFields() {
-		field := makeField()
-		known[field.GetName()] = true
-		if collection.Fields.GetByName(field.GetName()) == nil {
-			collection.Fields.Add(field)
-			changed = true
-			log.Info("settings field added", "field", field.GetName())
-		}
-	}
-	for _, name := range collection.Fields.FieldNames() {
-		field := collection.Fields.GetByName(name)
-		if field.GetSystem() || known[name] {
-			continue
-		}
-		collection.Fields.RemoveByName(name)
-		changed = true
-		log.Info("redundant settings field removed", "field", name)
-	}
-	if changed {
-		if err := app.Save(collection); err != nil {
-			return false, err
-		}
-	}
-	return changed, nil
-}
-
 // readSettings maps the singleton row to Settings, applying defaults for a
 // missing row or blank values. dirty is true when persisting would change
 // the stored row.
@@ -166,28 +100,13 @@ func writeSettings(app core.App, settings Settings) error {
 	return app.Save(row)
 }
 
-// reconcileSettings runs on start (Store.Open) and makes gateway_settings
-// match the schema: missing fields are added, unknown non-system fields
-// left over from older versions are removed, and the singleton row is
-// created or backfilled with defaults. Idempotent.
-func (s *Store) reconcileSettings() error {
-	collection, err := ensureSettingsCollection(s.app)
-	if err != nil {
-		return err
-	}
-	if _, err := reconcileSettingsFields(s.app, collection, s.log()); err != nil {
-		return err
-	}
+// seedSettings creates or backfills the gateway_settings singleton row on start.
+// Only the row is data; the collection's shape comes from the embedded snapshot
+// like every other, so this must not touch the schema. Idempotent.
+func (s *Store) seedSettings() error {
 	settings, dirty := readSettings(s.app)
 	if !dirty {
 		return nil
 	}
 	return writeSettings(s.app, settings)
-}
-
-func (s *Store) log() *slog.Logger {
-	if s.logger == nil {
-		return slog.Default()
-	}
-	return s.logger
 }

@@ -12,9 +12,9 @@ UI, and log store.
 - **Stable aliases** — clients send a name you choose; swapping providers is a UI edit.
   One alias can map to several providers as a fallback chain.
 - **Per-key access control** — optional allowlists over alias, provider, and model.
-- **Tools for agents** — hand a client the tools it may call and run one on request,
-  from your own conduit definitions or from MCP servers. MCP tools stay off until you
-  approve each one against a hash of its definition.
+- **Tools for agents** — hand a client the tools it may call and run one on request.
+  Your own tools are declarative HTTP recipes; the same catalog is also served over
+  MCP for agents that speak it.
 - **Usage history** — tokens (incl. cache hits), TTFT, duration, finish reason per request.
 - **Request shaping** — optional JSONata transformers per provider, fail-closed and audited.
 - **Debuggable when needed** — body capture off by default, capped, auto-expiring.
@@ -68,8 +68,8 @@ OpenAI's shape.
 
 ## Tools
 
-Prism can hand an agent the tools it is allowed to call, and run one on request. It
-does not decide to call them — the agent asks what is available, and runs its own loop.
+Prism can hand an agent the tools it is allowed to call, and run one on request. It does
+not decide to call them — the agent asks what is available, and runs its own loop.
 
 ```bash
 curl http://localhost:8090/v1/tools -H "Authorization: Bearer sk-…"
@@ -83,48 +83,39 @@ curl http://localhost:8090/v1/tools/<name>/invoke \
 chat request. A tool that ran and failed still answers `200` with `is_error: true` and
 the reason, because an agent feeds that back as a tool message like any other result.
 
-There are two kinds of tool:
+A tool is a [conduit](https://github.com/gera2ld/conduit) definition: a declarative
+YAML/JSON document describing HTTP calls. The document supplies the name, description and
+argument schema, and the engine validates arguments before running. Add one to the `tools`
+collection in the admin UI, which documents every field; `enabled` is the only switch.
+Definitions are checked when you save them, so a broken one is rejected there rather than
+at call time.
 
-- **Your own**, built from a [conduit](https://github.com/gera2ld/conduit) definition —
-  a declarative YAML/JSON document describing HTTP calls. The document supplies the
-  name, description and argument schema, and the engine validates arguments before
-  running. Add one to the `tools` collection; `enabled` is the only switch. Requests
-  carry a `Prism/<version>` User-Agent, since Go sends none by default and many public
-  APIs reject an unidentified client — a step's own `headers` override it.
-- **An MCP server's**, which the server publishes. See below.
+Requests carry a `Prism/<version>` User-Agent, since Go sends none by default and many public
+APIs reject an unidentified client. A step's own `headers` override it.
 
-### MCP servers
+### Over MCP
 
-Add one to the `mcp_servers` collection in the admin UI, which documents every field.
-For a local process set `transport` to `stdio` with the `command` and `args` to spawn
-it; for a hosted server set it to `http` with a `url` and any `headers`. Both speak
-MCP's Streamable HTTP transport, which carries server-initiated notifications;
-the legacy SSE transport is not supported.
+The same tools are served over the Model Context Protocol at `http://localhost:8090/mcp`,
+for agents that speak MCP instead of REST. Authenticate with a client API key, the same
+bearer token the REST endpoints take:
 
-Prism connects lazily, so a broken server cannot delay startup or block chat traffic.
-`env` and `headers` values are encrypted on write, and spawned servers inherit only a
-small whitelist of ambient variables (`PATH`, `HOME`, locale, proxy) — never Prism's
-own secrets.
+```json
+{ "mcpServers": { "prism": { "url": "http://localhost:8090/mcp",
+                             "headers": { "Authorization": "Bearer sk-…" } } } }
+```
 
-**MCP tools are off until you approve them, one at a time.** They are third-party code,
-so each approval is pinned to a hash of that tool's definition. Discover what a server
-publishes with `prism mcp tools <server>`, then approve the ones you want with
-`prism mcp approve <server> <tool> <hash>`.
+Prism serves MCP; it does not connect to other people's MCP servers. It publishes tool
+schemas exactly as your definitions write them, and an admin-UI change takes effect on the
+next call with no restart.
 
-Approval takes the hash you reviewed and refuses if the server has changed the tool
-since — you cannot approve a definition you did not look at. And if the server later
-edits that tool, its description or its schema, the hash stops matching and the tool
-drops out of `/v1/tools` on its own until you approve it again. Approving is therefore
-the allowlist: unapproved tools are invisible to agents.
 
-`prism mcp --help` lists the rest.
 
 ## Reference
 
 Both references document themselves, so this file does not duplicate them:
 
 - **Commands** — `prism --help`, and `prism <group> --help` for `key`, `provider`,
-  `route`, `mcp`, and `tool`. Inside the container:
+  `route`, `tool`, and `schema`. Inside the container:
   `docker exec prism /app/prism --help`.
 - **HTTP API** — interactive docs at `/api/prism/docs` on a running instance (raw
   spec at `/api/prism/docs/openapi.json`). Every command is also a superuser HTTP
@@ -147,12 +138,10 @@ Everything lives in the admin UI; edits apply without a restart.
 | `transformers` | JSONata reshaping per provider + model pattern, first match wins |
 | `gateway_settings` | Body-capture toggle, capture retention, cleanup schedule |
 | `request_logs` | Append-only usage history (tokens, timing, finish reason, outcome) |
-| `mcp_servers` | MCP servers to reach: transport, command or URL, encrypted secrets, on/off switch |
-| `mcp_tool_grants` | Which MCP tools are approved, each pinned to a definition hash |
 | `tools` | Your own tools, as conduit definitions, with an on/off switch |
-| `tool_logs` | Append-only tool invocation history (tool, source, outcome, duration) |
+| `tool_logs` | Append-only tool invocation history (tool, transport, outcome, duration) |
 
 Out of scope by design: stateful APIs (chat completions only), multi-user/quota models,
-automatic cheapest-route selection, non-OpenAI provider dialects, and running the
-agent's loop — Prism lists the tools a client may call and executes one on request,
-but it never decides to call them.
+automatic cheapest-route selection, non-OpenAI provider dialects, running the agent's
+loop — Prism lists the tools a client may call and executes one on request, but it never
+decides to call them — and consuming other people's MCP servers.

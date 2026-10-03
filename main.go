@@ -1,12 +1,10 @@
 package main
 
 import (
-	"context"
 	"fmt"
 	"log/slog"
-	"maps"
+	"net/http"
 	"os"
-	"slices"
 	"strings"
 	"text/tabwriter"
 
@@ -17,17 +15,32 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/gera2ld/prism/internal/gateway"
+	"github.com/gera2ld/prism/internal/mcpserver"
 	"github.com/gera2ld/prism/internal/store"
 )
+
+// authenticateBearer resolves the Authorization header to a client key. It
+// mirrors the proxy's own check so every agent-facing surface, REST or MCP,
+// accepts exactly one credential.
+func authenticateBearer(config gateway.Config, r *http.Request) (gateway.Key, error) {
+	header := r.Header.Get("Authorization")
+	token, ok := strings.CutPrefix(header, "Bearer ")
+	if !ok || token == "" {
+		return gateway.Key{}, gateway.ErrUnauthorized
+	}
+	return config.Authenticate(r.Context(), token)
+}
 
 func main() {
 	app := pocketbase.NewWithConfig(pocketbase.Config{
 		DefaultDataDir: "./pb_data",
 	})
 
-	migratecmd.MustRegister(app, app.RootCmd, migratecmd.Config{
-		Automigrate: true,
-	})
+	// The migrate command is kept for `down` and for one-off data changes.
+	// Automigrate is deliberately off: it writes a migration file on every
+	// admin-UI collection edit, which is the wrong artefact here. A schema
+	// change is captured once, deliberately, via `prism schema export`.
+	migratecmd.MustRegister(app, app.RootCmd, migratecmd.Config{})
 
 	logger := slog.New(slog.NewTextHandler(os.Stderr, nil))
 
@@ -55,17 +68,26 @@ func main() {
 					logger.Error("invalid retention_cron, keeping previous schedule", "error", err)
 				}
 			})
-			// stdio servers are child processes; without this they would
-			// outlive the gateway.
-			app.OnTerminate().BindFunc(func(e *core.TerminateEvent) error {
-				gwStore.CloseMCP()
-				return e.Next()
-			})
 
 			e.Router.Any("/v1/{path...}", func(e *core.RequestEvent) error {
 				proxy.ServeHTTP(e.Response, e.Request)
 				return nil
 			})
+
+			// The same tools over MCP, for agents that speak it. Auth is the
+			// client API key, read here rather than by the SDK, so /mcp cannot
+			// become an unauthenticated tool executor.
+			mcpServer := mcpserver.New(gwStore.Tools(), store.NewToolLogSink(app), logger)
+			mcpServer.SetCapture(gwStore.CaptureEnabled)
+			e.Router.Any(mcpserver.Path, func(e *core.RequestEvent) error {
+				key, err := authenticateBearer(gwStore, e.Request)
+				if err != nil {
+					return e.UnauthorizedError("Invalid API key.", err)
+				}
+				mcpServer.Handler(key).ServeHTTP(e.Response, e.Request)
+				return nil
+			})
+
 			prismMux := newPrismMux(app, gwStore)
 			registerPrismAPI(e, prismMux)
 			return e.Next()
@@ -200,102 +222,6 @@ func main() {
 	routeCmd.AddCommand(routeImport)
 	app.RootCmd.AddCommand(routeCmd)
 
-	mcpCmd := &cobra.Command{
-		Use:   "mcp",
-		Short: "Manage MCP servers and tool approvals",
-	}
-	mcpCmd.AddCommand(&cobra.Command{
-		Use: "list", Args: cobra.NoArgs,
-		Short: "List MCP servers (never env or header values)",
-		RunE: withStore(func(cmds *Commands, _ []string) error {
-			servers, err := cmds.ListMCPServers()
-			if err != nil {
-				return err
-			}
-			w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
-			fmt.Fprintln(w, "NAME\tTRANSPORT\tTARGET\tENABLED\tSECRETS")
-			for _, s := range servers {
-				target := s.URL
-				if s.Transport == "stdio" {
-					target = strings.TrimSpace(s.Command + " " + strings.Join(s.Args, " "))
-				}
-				fmt.Fprintf(w, "%s\t%s\t%s\t%t\t%t\n", s.Name, s.Transport, target, s.Enabled, s.HasSecrets)
-			}
-			return w.Flush()
-		}),
-	})
-	mcpCmd.AddCommand(&cobra.Command{
-		Use: "tools <server>", Args: cobra.ExactArgs(1),
-		Short: "List a server's tools with approval status and definition hash",
-		RunE: withStore(func(cmds *Commands, args []string) error {
-			tools, err := cmds.ListMCPTools(context.Background(), args[0])
-			if err != nil {
-				return err
-			}
-			w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
-			fmt.Fprintln(w, "TOOL\tSTATUS\tCALLABLE\tDEFINITION_HASH")
-			for _, t := range tools {
-				fmt.Fprintf(w, "%s\t%s\t%t\t%s\n", t.Tool, t.Status, t.Status == "approved", t.Hash)
-			}
-			return w.Flush()
-		}),
-	})
-	mcpApprove := &cobra.Command{
-		Use: "approve <server> <tool> <hash>", Args: cobra.ExactArgs(3),
-		Short: "Approve a tool by pinning the definition hash you reviewed",
-		Long: "Approve a tool by pinning the definition hash you reviewed.\n\n" +
-			"Read the hash from `mcp tools <server>`. If the server redefines the tool\n" +
-			"later the hash stops matching and the tool is withheld from agents until it\n" +
-			"is approved again.",
-		RunE: withStore(func(cmds *Commands, args []string) error {
-			if err := cmds.ApproveMCPTool(context.Background(), args[0], args[1], args[2]); err != nil {
-				return err
-			}
-			fmt.Printf("approved %s/%s\n", args[0], args[1])
-			return nil
-		}),
-	}
-	mcpCmd.AddCommand(mcpApprove)
-	mcpCmd.AddCommand(&cobra.Command{
-		Use: "revoke <server> <tool>", Args: cobra.ExactArgs(2),
-		Short: "Revoke a tool approval",
-		RunE: withStore(func(cmds *Commands, args []string) error {
-			if err := cmds.RevokeMCPTool(args[0], args[1]); err != nil {
-				return err
-			}
-			fmt.Printf("revoked %s/%s\n", args[0], args[1])
-			return nil
-		}),
-	})
-	mcpCmd.AddCommand(&cobra.Command{
-		Use: "refresh <server>", Args: cobra.ExactArgs(1),
-		Short: "Reconnect and relist a server",
-		RunE: withStore(func(cmds *Commands, args []string) error {
-			if err := cmds.RefreshMCPServer(args[0]); err != nil {
-				return err
-			}
-			fmt.Printf("refreshed %s\n", args[0])
-			return nil
-		}),
-	})
-	mcpCmd.AddCommand(&cobra.Command{
-		Use: "reveal <server>", Args: cobra.ExactArgs(1),
-		Short: "Decrypt and print a server's env and header values",
-		RunE: withStore(func(cmds *Commands, args []string) error {
-			secrets, err := cmds.RevealMCPSecrets(args[0])
-			if err != nil {
-				return err
-			}
-			w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
-			fmt.Fprintln(w, "FIELD\tVALUE")
-			for _, field := range slices.Sorted(maps.Keys(secrets)) {
-				fmt.Fprintf(w, "%s\t%s\n", field, secrets[field])
-			}
-			return w.Flush()
-		}),
-	})
-	app.RootCmd.AddCommand(mcpCmd)
-
 	toolCmd := &cobra.Command{
 		Use:   "tool",
 		Short: "Manage conduit tools",
@@ -336,6 +262,32 @@ func main() {
 		}),
 	})
 	app.RootCmd.AddCommand(toolCmd)
+
+	schemaCmd := &cobra.Command{
+		Use:   "schema",
+		Short: "Capture the database schema for embedding in the binary",
+	}
+	schemaCmd.AddCommand(&cobra.Command{
+		Use:   "export",
+		Short: "Print the collections snapshot to embed as internal/store/schema.json",
+		Long: "Print the collections snapshot in the form the binary embeds.\n\n" +
+			"Edit collections in the admin UI, run this, and commit the result. The\n" +
+			"snapshot is the schema: it is applied in full on every start, so what it\n" +
+			"declares is what exists and what it omits is removed.\n\n" +
+			"    prism schema export > internal/store/schema.json",
+		Args: cobra.NoArgs,
+		RunE: withStore(func(cmds *Commands, _ []string) error {
+			data, err := cmds.ExportSchema()
+			if err != nil {
+				return err
+			}
+			// Print, not Println: the export already ends in a newline, and
+			// adding another would make every regenerated file differ.
+			fmt.Print(string(data))
+			return nil
+		}),
+	})
+	app.RootCmd.AddCommand(schemaCmd)
 
 	if err := app.Start(); err != nil {
 		logger.Error("fatal", "error", err)

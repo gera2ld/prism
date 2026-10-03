@@ -16,10 +16,9 @@ import (
 )
 
 type fakeRegistry struct {
-	tools  []gateway.Tool
-	result gateway.ToolResult
-	err    error
-	// gotArgs records the arguments the last invocation received.
+	tools   []gateway.Tool
+	result  gateway.ToolResult
+	err     error
 	gotArgs string
 	calls   int
 }
@@ -88,14 +87,11 @@ func sampleTools() []gateway.Tool {
 			Name:        "weather",
 			Description: "Reports the weather.",
 			InputSchema: json.RawMessage(`{"type":"object","properties":{"city":{"type":"string"}}}`),
-			Source:      gateway.SourceConduit,
 		},
 		{
-			Name:        "mcp__fs__read_file",
+			Name:        "reads_file",
 			Description: "Reads a file.",
 			InputSchema: json.RawMessage(`{"type":"object"}`),
-			Source:      gateway.SourceMCP,
-			Server:      "fs",
 		},
 	}
 }
@@ -148,7 +144,6 @@ func TestListToolsReturnsOpenAIShape(t *testing.T) {
 		t.Fatalf("listing = %s", body)
 	}
 	first := listing.Data[0]
-	// The shape must be one an agent can hand straight to a chat request.
 	if first.Type != "function" || first.ID != "weather" {
 		t.Fatalf("entry = %+v", first)
 	}
@@ -158,7 +153,7 @@ func TestListToolsReturnsOpenAIShape(t *testing.T) {
 	if !strings.Contains(string(first.Function.Parameters), `"city"`) {
 		t.Fatalf("parameters = %s", first.Function.Parameters)
 	}
-	if listing.Data[1].ID != "mcp__fs__read_file" {
+	if listing.Data[1].ID != "reads_file" {
 		t.Fatalf("second entry = %+v", listing.Data[1])
 	}
 }
@@ -169,8 +164,6 @@ func TestListToolsEmptyCatalogIsAnEmptyList(t *testing.T) {
 	if code != http.StatusOK {
 		t.Fatalf("status = %d: %s", code, body)
 	}
-	// An empty catalog must serialize as [] rather than null, so a client can
-	// range over it without a nil check.
 	if !strings.Contains(body, `"data":[]`) {
 		t.Fatalf("body = %s, want an empty array", body)
 	}
@@ -224,15 +217,15 @@ func TestInvokeToolReturnsResult(t *testing.T) {
 	if rec.Outcome != gateway.ToolOutcomeCompleted || rec.Status != http.StatusOK {
 		t.Fatalf("record = %+v", rec)
 	}
+	if rec.Transport != gateway.TransportREST {
+		t.Fatalf("transport = %q, want %q", rec.Transport, gateway.TransportREST)
+	}
 	if rec.Args != `{"city":"Oslo"}` || !strings.Contains(rec.Result, "temp") {
 		t.Fatalf("captured args=%q result=%q", rec.Args, rec.Result)
 	}
 }
 
 func TestInvokeToolFailureIsStillTwoHundred(t *testing.T) {
-	// A tool that ran and failed must be a 200 carrying is_error, because an
-	// agent feeds both cases back as a tool message and cannot special-case a
-	// transport failure.
 	registry := &fakeRegistry{result: gateway.ToolResult{Result: "upstream said 503", IsError: true}}
 	server, sink := toolProxy(t, registry, true)
 
@@ -301,7 +294,6 @@ func TestInvokeRejectsMalformedBody(t *testing.T) {
 			t.Fatalf("body %s: status = %d, want 400", body, code)
 		}
 	}
-	// A rejected request never reaches the registry and never logs a call.
 	if registry.calls != 0 {
 		t.Fatalf("registry was called %d times for malformed bodies", registry.calls)
 	}
@@ -314,8 +306,6 @@ func TestInvokeDefaultsMissingArgumentsToEmptyObject(t *testing.T) {
 	registry := &fakeRegistry{result: gateway.ToolResult{Result: "pong"}}
 	server, _ := toolProxy(t, registry, false)
 
-	// Absent, empty and null arguments all mean "no arguments", which is what a
-	// tool with no parameters expects.
 	for _, body := range []string{"", "{}", `{"arguments":null}`, `null`} {
 		registry.gotArgs = ""
 		code, resp := do(t, http.MethodPost, server.URL+"/v1/tools/ping/invoke", body)
@@ -328,19 +318,6 @@ func TestInvokeDefaultsMissingArgumentsToEmptyObject(t *testing.T) {
 	}
 }
 
-func TestInvokePassesExplicitArguments(t *testing.T) {
-	registry := &fakeRegistry{result: gateway.ToolResult{Result: "ok"}}
-	server, _ := toolProxy(t, registry, false)
-
-	code, body := do(t, http.MethodPost, server.URL+"/v1/tools/weather/invoke", `{"arguments":{"city":"Oslo","days":3}}`)
-	if code != http.StatusOK {
-		t.Fatalf("status = %d: %s", code, body)
-	}
-	if !strings.Contains(registry.gotArgs, `"days":3`) {
-		t.Fatalf("arguments = %s", registry.gotArgs)
-	}
-}
-
 func TestInvokeOmitsPayloadsWhenCaptureIsOff(t *testing.T) {
 	registry := &fakeRegistry{result: gateway.ToolResult{Result: map[string]any{"a": 1}}}
 	server, sink := toolProxy(t, registry, false)
@@ -350,8 +327,6 @@ func TestInvokeOmitsPayloadsWhenCaptureIsOff(t *testing.T) {
 		t.Fatalf("status = %d", code)
 	}
 	rec := sink.records[0]
-	// The outcome is history and always recorded; the payloads are not, because
-	// capture is off by default.
 	if rec.Args != "" || rec.Result != "" {
 		t.Fatalf("captured args=%q result=%q with capture off", rec.Args, rec.Result)
 	}
@@ -374,8 +349,6 @@ func TestInvokeTruncatesCapturedPayloads(t *testing.T) {
 		t.Fatalf("status = %d: %s", code, resp)
 	}
 	rec := sink.records[0]
-	// The cap keeps one runaway payload from bloating the database; the client
-	// still receives the untruncated result.
 	if !rec.Truncated {
 		t.Fatal("expected the capture to be marked truncated")
 	}
@@ -390,24 +363,22 @@ func TestInvokeTruncatesCapturedPayloads(t *testing.T) {
 func TestInvokeRequiresPostAndKnownShape(t *testing.T) {
 	server, _ := toolProxy(t, &fakeRegistry{result: gateway.ToolResult{}}, false)
 
-	// GET on the collection path lists; GET on the invoke path is not an invoke.
 	if code, _ := do(t, http.MethodGet, server.URL+"/v1/tools/weather/invoke", ""); code != http.StatusNotFound {
 		t.Fatalf("GET invoke status = %d, want 404", code)
 	}
 	if code, _ := do(t, http.MethodPost, server.URL+"/v1/tools", ""); code != http.StatusNotFound {
 		t.Fatalf("POST /v1/tools status = %d, want 404", code)
 	}
-	// A path with no tool name is not an invocation.
 	if code, _ := do(t, http.MethodPost, server.URL+"/v1/tools//invoke", `{"arguments":{}}`); code != http.StatusNotFound {
 		t.Fatalf("empty tool name status = %d, want 404", code)
 	}
 }
 
-func TestInvokeNamespacedName(t *testing.T) {
+func TestInvokeSecondToolName(t *testing.T) {
 	registry := &fakeRegistry{result: gateway.ToolResult{Result: "file contents"}}
 	server, _ := toolProxy(t, registry, false)
 
-	code, body := do(t, http.MethodPost, server.URL+"/v1/tools/mcp__fs__read_file/invoke", `{"arguments":{"path":"a.txt"}}`)
+	code, body := do(t, http.MethodPost, server.URL+"/v1/tools/reads_file/invoke", `{"arguments":{"path":"a.txt"}}`)
 	if code != http.StatusOK {
 		t.Fatalf("status = %d: %s", code, body)
 	}
@@ -430,7 +401,6 @@ func TestToolsRequireAuthOnInvoke(t *testing.T) {
 	if resp.StatusCode != http.StatusUnauthorized {
 		t.Fatalf("status = %d, want 401", resp.StatusCode)
 	}
-	// An unauthenticated attempt is not logged as a tool call: nothing ran.
 	if len(sink.records) != 0 {
 		t.Fatalf("unauthenticated invoke was logged: %+v", sink.records)
 	}

@@ -222,7 +222,7 @@ func registerToolDocs(openAPI *huma.OpenAPI) {
 			OperationID: "list-tools",
 			Summary:     "List callable tools",
 			Description: "The tools this key may call, in OpenAI's tool shape so the array can be handed straight to a chat request's tools field.\n\n" +
-				"MCP tools are disabled until individually approved, and each approval is pinned to a hash of the tool's definition: if the server changes a tool, its description or its schema, the hash stops matching and the tool disappears from this list until it is approved again. A tool the key may not call is simply absent.",
+				"Built from your own conduit definitions, where each document supplies the name, description and argument schema. A tool that is disabled, or whose definition no longer compiles, is simply absent. The same tools are also served over MCP at /mcp.",
 			Tags:     []string{"tools"},
 			Security: clientKeySecurity,
 			Responses: func() map[string]*huma.Response {

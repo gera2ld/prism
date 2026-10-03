@@ -13,7 +13,7 @@ log store, while the proxy itself is plain `net/http`.
 - **Stable names.** I refer to models by aliases I choose. Swapping the provider behind an alias
   is an edit in the admin UI, not a change in every client.
 - **One place to reach for tools.** An agent asks this gateway what it may call and calls those
-  tools here, whether they are mine or an MCP server's.
+  tools here, and speaks MCP so agents that prefer it can ask for them there.
 - **Know what I spent.** Every request records token usage, TTFT, and total duration.
 - **Debuggable when I need it.** Full request/response capture exists, is off by default, and
   expires on its own.
@@ -30,14 +30,54 @@ log store, while the proxy itself is plain `net/http`.
   with native-only APIs are handled by putting a compatible shim in front of them, not by
   teaching the gateway their dialect.
 - **Not a cost optimizer.** No automatic cheapest-route selection, no semantic caching.
-- **Not an MCP server.** Prism is an MCP client. Exposing its own catalog over MCP is a natural
-  follow-up, not a launch requirement.
+- **Not an MCP client.** Prism does not consume other people's MCP servers. Its tools are its
+  own, defined in the database, so there is no third-party definition to review and approve. It
+  does serve them over MCP, one direction only.
 
 ## Data model
 
-Eight collections. The first two are configuration I edit by hand; `routes` and `transformers`
-shape requests; `request_logs` and `request_bodies` are chat history; the rest belong to the
-tools surface.
+Fourteen collections, declared in `internal/store/schema.json` and embedded in the binary:
+nine are configuration and stores, four are read-only usage views.
+The first two are configuration I edit by hand; `routes` and `transformers` shape requests;
+`request_logs` and `request_bodies` are chat history; the rest belong to the tools surface.
+
+### Schema ownership
+
+The schema is data in the binary. `schema.json` holds a PocketBase collections snapshot,
+applied in full on every open. It is the single source of truth in both
+directions: a field it declares is created when absent and restored when deleted in the admin
+UI, and a field or collection it no longer declares is removed along with its records. A fresh
+database therefore needs nothing extra to have a schema, and changing one needs nothing extra
+in either direction.
+
+The admin UI is where a schema change is authored; exporting the collections document and
+committing it is how the change comes back. `CanonicalSnapshot` accepts whatever shape the
+export arrived in — a bare array or the list endpoint's `items` envelope, with system
+collections mixed in — and normalizes it, so the file needs no hand-editing. Export is
+deterministic, since PocketBase derives ids from names, so an unchanged database regenerates the
+file byte for byte and a real change shows as a small diff. A test asserts that exact round-trip,
+so the import cannot silently become lossy.
+
+Because the snapshot is authoritative, a wrong one is an ordinary reviewable diff rather than a
+silent boot-time effect — which is the reason it is a committed file and not something derived
+at startup.
+
+There are no migrations at all. The project registers none, and a test asserts that, because
+the schema is the snapshot and there is no data to move: every row in the database is either
+operator-authored configuration or something the gateway wrote and can recompute. A migration
+appearing would mean something hand-written had crept in that the snapshot could describe.
+
+With no migrations, the snapshot has to be able to carry a database forward from any earlier
+state on its own. One case needed care. When a view selects a column that the new snapshot
+drops, the import cannot satisfy it in either order: the table cannot lose the column while the
+view selects it, and the view cannot be rewritten to select a column the table does not have
+yet. Each half needs the other to have gone first. So a view whose query the snapshot rewrites is
+dropped before the import and recreated by it. A view is a pure projection holding no rows, so
+there is nothing to lose, and the snapshot rebuilds it with a query consistent with the tables
+written alongside. Only the views whose query actually changed are dropped: an unchanged view
+selects columns that still exist, so a boot where the schema did not change leaves every view
+untouched. A view the snapshot does not declare is left for the import to delete, since deleting
+one is never blocked by the column it selects.
 
 ### `providers`
 
@@ -72,8 +112,7 @@ One row per request, written after the response completes or fails.
 Identity and routing: `api_key` (relation), `api_key_name` (API-key name snapshot), `alias`,
 `provider` (relation), `provider_name` (provider-name snapshot), `upstream_model`, `transformer`
 (name of the transformer that shaped
-the request, empty when none), `stream`. Request history is disposable pre-release data;
-the provider relation migration resets existing `request_logs` and `request_bodies` rows.
+the request, empty when none), `stream`. Request history is disposable pre-release data.
 Usage: `prompt_tokens`, `completion_tokens`, `total_tokens`, `cached_tokens` (prompt-cache
 hits, a subset of `prompt_tokens`) — all nullable.
 Timing: `started_at` (gateway-side request start, UTC; NULL on rows logged before the field
@@ -124,33 +163,11 @@ off by default), `retention_hours` (how long `request_bodies` rows are kept, def
 `retention_cron` (cleanup job schedule, default `0 3 * * *`).
 Cached in memory, invalidated by record-change hooks, so edits apply without a restart —
 including the cron schedule, which is re-registered live (an invalid expression keeps the
-previous job, so a typo never kills cleanup).
-On every start the collection is reconciled with the schema: missing fields and defaults
-are generated, redundant fields from older versions are removed.
+previous job, so a typo never kills cleanup). The singleton row is created or backfilled with
+defaults on every start; its columns, like every other collection's, come from the snapshot.
 
 Only `GATEWAY_ENCRYPTION_KEY` deliberately stays environment-only: a secret that must
 not sit next to the ciphertext it protects, and is needed before the database opens.
-
-### `mcp_servers`
-
-An MCP server the gateway can reach. `name` (unique, `^[a-zA-Z0-9_-]+$`, and the namespace
-component of every tool it publishes), `transport` (`stdio` or `http`), `command`/`args`/`env`
-for stdio, `url`/`headers` for http, `enabled` (master switch).
-
-`env` and `headers` are credentials: each is a JSON object whose values are encrypted at rest
-under the same `enc:` scheme as provider and client-key secrets, revealed only through
-`mcp reveal <server>`. Listing shows only whether a server *has* secrets.
-
-Connections are lazy — nothing dials until a tool is actually needed, so a broken or slow
-server cannot delay startup or block the chat proxy. The supervisor reconnects with capped
-exponential backoff on a dropped session; `mcp refresh` forces it immediately for a server that
-changed its tools without sending a notification.
-
-### `mcp_tool_grants`
-
-The approval ledger, one row per approved tool: `server` (relation, cascade delete), `tool`
-(name as the server publishes it), `definition_hash` (`^[a-f0-9]{64}$`, the last **approved**
-hash), `approved`. Unique on `(server, tool)`.
 
 ### `tools` — conduit tools
 
@@ -164,7 +181,7 @@ definition, so they cannot drift from the behavior the agent is shown.
 
 One row per invocation, for the same reason `request_logs` exists: to see what was called and
 how it went. `started_at`, `api_key` (relation), `api_key_name`, `tool`, `source` (`conduit`
-or `mcp`), `server`, `arguments`/`result`/`truncated` (captured payload), `duration_ms`,
+or `mcp`), `arguments`/`result`/`truncated` (captured payload), `duration_ms`,
 `status`, `outcome`, `error`.
 
 A tool call has no provider, model or token usage, which is why this is separate from
@@ -213,14 +230,12 @@ translation layer: upstreams must still speak OpenAI-compatible HTTP.
 
 ### Tools
 
-Two sources, one catalog. Conduit tools are named by their record; MCP tools are namespaced as
-`mcp__<server>__<tool>`, so two servers that both publish `read_file` stay distinct. Conduit
-names are pattern-constrained so they cannot collide with the `mcp__` prefix.
-
-**Conduit tools.** A conduit definition is already a function-calling spec — `name`,
-`description`, `input_schema` — and the engine validates incoming arguments against that schema
-before running. So publishing one is the whole job. Definitions are parsed at save time and an
-uncompilable one is rejected, so bad YAML, unknown methods and duplicate step ids never persist.
+One source, one catalog. A tool is a conduit definition I wrote; the document supplies the
+name, description and argument schema, and the engine validates arguments against that schema
+before running. So publishing one is the whole job — the record name is the callable identity,
+and the description and schema are derived rather than stored, so they cannot drift from the
+behavior the agent is shown. Definitions are parsed at save time and an uncompilable one is
+rejected, so bad YAML, unknown methods and duplicate step ids never persist.
 
 Every outbound request carries a default `Prism/<version>` User-Agent. Go's HTTP client sends
 none unless one is set, and public APIs answer an unidentified client with a bare 403 and no
@@ -230,40 +245,33 @@ APIs, for containing parentheses or an `@`, so adding contact details at the gat
 introduce a failure. A step's own headers still win, so a definition that needs richer
 identification sets it where it is written.
 
-**MCP tools are disabled by default.** They are third-party code I do not control, so they get
-two gates rather than one flag:
-
-```
-exposed ⇔  server.enabled            ∧ a grant row exists
-           ∧ grant.definition_hash == the server's current definition hash
-```
-
-There is deliberately **no `enabled` boolean on the grant**. The row's existence is the toggle
-and the hash is the pin, so the two cannot drift apart.
-
-- **Every change re-locks the tool.** The hash covers `name`, `title`, `description`,
-  `input_schema`, `output_schema` and `annotations`. Including the description closes the
-  quiet-description-edit prompt-injection vector; including the annotations catches a
-  `destructiveHint` flipping false→true. `_meta` is excluded because it carries per-session
-  protocol bookkeeping that would re-lock constantly, and icons are excluded as presentational
-  and an outbound tracking channel. Numbers keep their literal form, so two definitions differing
-  only in a large integer schema bound cannot collide.
-- **Approval is a compare-and-swap.** `mcp approve` takes the hash that was reviewed and refuses
-  with 409 if the server has since redefined the tool, rather than extending consent to a
-  definition nobody saw.
-- **Discovery re-lists on every `GET /v1/tools`.** The pin is only worth anything if definitions
-  are actually re-read; caching them would leave a silently changed tool callable. The cost is one
-  `tools/list` per server on a path an agent hits once per conversation.
-- **Approvals survive a flapping server.** A grant whose tool the server has stopped publishing
-  is kept and reported as `orphaned` rather than deleted, so a server dropping off a flaky network
-  does not lose every approval it had.
-- **A withheld tool is invisible.** Unapproved and changed tools never reach an agent; they are
-  visible only through the operator API.
-
 A tool that ran and failed is still HTTP 200 with `is_error: true` and the reason in `result`,
 because an agent feeds both cases back as a tool message and cannot special-case a transport
-failure. Only a gateway fault, or a name that is not callable, is a non-200. MCP arguments are
-not validated client-side by any SDK; conduit definitions are, by the engine.
+failure. Only a gateway fault, or a name that is not callable, is a non-200.
+
+### Exposing tools over MCP
+
+The same catalog is served over the Model Context Protocol at `POST /mcp`, for agents that
+speak it rather than REST. It is one direction only: Prism does not consume other people's MCP
+servers.
+
+- **Authenticated by a client API key**, checked in the router before the SDK sees the request,
+  so `/mcp` cannot become an unauthenticated tool executor on a gateway that listens on a port.
+- **The session is stateless.** The SDK builds a server per request and closes it when the
+  request ends, so the catalog is rebuilt every time and an admin-UI edit applies with no
+  restart. That is also what lets an invocation be attributed to the key that made it, since the
+  tool handler runs inside the caller's request.
+- **Schemas are published verbatim.** The SDK does not compile them, so a definition using any
+  JSON Schema draft works as written.
+- **Two unusable schemas are refused rather than published**, because the SDK panics on them: a
+  schema that is not an object, and one carrying properties with no `type`. A definition with no
+  schema at all is published as an empty object schema rather than hidden — it is still callable,
+  and hiding it would be surprising. Refusal logs and skips, so an admin-UI edit cannot take the
+  gateway down.
+- **A failed tool is a tool-level error**, returned as `isError` with the reason as content,
+  which is how an MCP client expects it. Only a gateway fault becomes a protocol error.
+
+Invocations from either surface land in `tool_logs` with `transport` distinguishing them.
 
 ### Capture
 
@@ -287,9 +295,8 @@ realistic pressure point is log volume rather than concurrency, so retention is 
 before a different database is. If that ever stops being true, these interfaces are the only
 things a replacement has to satisfy.
 
-The MCP connection supervisor sits behind the same seam: it knows nothing about PocketBase, taking
-plain server configs and returning plain results, which is why it can be tested against
-in-process transports with no subprocess and no network.
+The MCP server sits behind that seam too: it knows nothing about PocketBase, taking a tool registry
+and a log sink, which is why it can be tested against in-process transports with no network.
 
 ## Surface
 
@@ -298,14 +305,15 @@ in-process transports with no subprocess and no network.
 - `GET /v1/tools` — the tools this key may call, in OpenAI's tool shape so an agent can hand the
   array straight to a chat request.
 - `POST /v1/tools/{name}/invoke` — run one tool. A failed tool is still 200 with `is_error` true.
+- `POST /mcp` — the same tools over MCP, for agents that speak it.
 - `/_/` — PocketBase admin UI: configuration, approvals, and usage history as a queryable table.
 
 Authentication is a bearer token matched against `api_keys`. Key policy is model-scoped, so every
 valid key sees the same approved tool catalog.
 
 Operational CLI commands are exposed directly as `key generate`, `key reveal`, `key list`,
-`provider list`, `provider reveal`, `route export`, `route import`, `mcp list`, `mcp tools`,
-`mcp approve`, `mcp revoke`, `mcp refresh`, `mcp reveal`, `tool list`, and `tool validate`;
+`provider list`, `provider reveal`, `route export`, `route import`, `tool list`, and
+`tool validate`;
 `just` is reserved for build, test, and server conveniences. Every CLI command is
 also a superuser HTTP endpoint under `/api/prism/*` (same store methods, documented
 via huma OpenAPI at `/api/prism/docs`, which additionally documents the
@@ -318,8 +326,9 @@ endpoints for client-key holders.
 - **Whether `/v1/embeddings` is worth adding.** Same passthrough shape, so cheap, but unused so far.
 - **Whether failover deserves to exist at all**, or whether a failed request I can see in the log
   is the more honest outcome for a personal gateway.
-- **Whether tool policy should be per-key.** Today every valid key sees the full approved
-  catalog, because key policy is model-scoped only. A per-key allowlist would fit the existing
+- **Whether tool policy should be per-key.** Today every valid key sees the whole catalog,
+  because key policy is model-scoped only. A per-key allowlist would fit the existing
   `alias_pattern` style, but I have not yet wanted it.
-- **Whether Prism should serve MCP itself.** It is an MCP client today; exposing the same
-  catalog to other agents would make the approval ledger useful from both sides.
+- **Whether serving MCP is earning its keep.** It is one dependency the binary would not have
+  without it, and one more surface to document and keep working. It is cheap now that the
+  catalogue build is shared with REST, but it is not free.

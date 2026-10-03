@@ -14,7 +14,6 @@ import (
 	"sync"
 	"time"
 
-	mcpsdk "github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/pocketbase/dbx"
 	"github.com/pocketbase/pocketbase/core"
 	"github.com/pocketbase/pocketbase/tools/hook"
@@ -22,7 +21,6 @@ import (
 	"golang.org/x/crypto/pbkdf2"
 
 	"github.com/gera2ld/prism/internal/gateway"
-	"github.com/gera2ld/prism/internal/mcp"
 )
 
 type providerConfig struct {
@@ -49,13 +47,9 @@ type Store struct {
 	transformers       []gateway.Transformer
 	transformersLoaded bool
 
-	// catalog holds the cache
+	// catalog holds the tool cache. Built here so the record hooks below can
+	// invalidate it, and handed to the proxy by main.
 	catalog *toolCatalog
-
-	// pool is the MCP connection supervisor, replaceable via WithMCPPool.
-	pool *mcp.Pool
-	// mcpDial optionally overrides a server's transport, set by WithMCPDial.
-	mcpDial func(server string) func(context.Context) (mcpsdk.Transport, error)
 
 	onSettingsChange func()
 }
@@ -67,24 +61,7 @@ const pbkdf2Iterations = 600000
 // force re-derivation.
 const encryptionSalt = "prism-gateway-encryption-v1"
 
-// Option configures the store at open time.
-type Option func(*Store)
-
-// WithMCPPool supplies the connection pool instead of creating one. It exists
-// so tests can substitute in-process transports for real servers; production
-// callers never need it.
-func WithMCPPool(pool *mcp.Pool) Option {
-	return func(s *Store) { s.pool = pool }
-}
-
-// WithMCPDial overrides how a named server is reached, bypassing the transport
-// its record describes. Like WithMCPPool this is a test seam, letting the
-// approval ledger be exercised against an in-process server with no subprocess.
-func WithMCPDial(dial func(server string) func(context.Context) (mcpsdk.Transport, error)) Option {
-	return func(s *Store) { s.mcpDial = dial }
-}
-
-func Open(app core.App, logger *slog.Logger, options ...Option) (*Store, error) {
+func Open(app core.App, logger *slog.Logger) (*Store, error) {
 	secret := os.Getenv("GATEWAY_ENCRYPTION_KEY")
 	if secret == "" {
 		return nil, errors.New("GATEWAY_ENCRYPTION_KEY must be set")
@@ -95,9 +72,6 @@ func Open(app core.App, logger *slog.Logger, options ...Option) (*Store, error) 
 		logger:     logger,
 		targets:    map[string][]gateway.Target{},
 		keys:       map[string]gateway.Key{},
-	}
-	for _, option := range options {
-		option(s)
 	}
 	invalidate := &hook.Handler[*core.RecordEvent]{
 		Func: func(e *core.RecordEvent) error {
@@ -203,25 +177,21 @@ func Open(app core.App, logger *slog.Logger, options ...Option) (*Store, error) 
 	app.OnRecordAfterUpdateSuccess("api_keys").Bind(invalidateKeys)
 	app.OnRecordAfterDeleteSuccess("api_keys").Bind(invalidateKeys)
 
-	// Reconcile gateway_settings with the schema on every start: missing
-	// fields/defaults are generated, redundant fields removed.
-	if err := s.reconcileSettings(); err != nil {
+	// The embedded snapshot is the schema, applied on every open.
+	if err := ApplySchema(app); err != nil {
 		return nil, err
 	}
 
-	// The tools catalog needs the store's own record access and its decryption
-	// key, and registers its hooks here so an admin UI edit invalidates it the
-	// same way a route edit does.
-	if s.pool == nil {
-		s.pool = mcp.NewPool(logger)
-	}
-	s.catalog = newToolCatalog(app, s.pool, logger, s.decrypt, s.mcpDial)
-	s.registerToolHooks(s.catalog)
-	// Prime the pool with the current servers. Nothing dials yet: sessions are
-	// established on first use so a broken server cannot delay startup.
-	if err := s.catalog.mcp.Invalidate(false); err != nil {
+	// The gateway_settings row is data rather than schema, so it is seeded here.
+	if err := s.seedSettings(); err != nil {
 		return nil, err
 	}
+
+	// The tools catalog needs the store's own record access, and registers its
+	// hooks here so an admin UI edit invalidates it the same way a route edit
+	// does.
+	s.catalog = newToolCatalog(app, logger)
+	s.registerToolHooks(s.catalog)
 	return s, nil
 }
 
@@ -233,68 +203,12 @@ func (s *Store) Tools() gateway.ToolRegistry {
 	return s.catalog
 }
 
-// MCPServers returns every configured server, without secrets.
-func (s *Store) MCPServers() ([]MCPServerInfo, error) {
-	if s.catalog == nil {
-		return nil, errors.New("tools are not initialized")
-	}
-	return s.catalog.mcp.Servers()
-}
-
-// RevealMCPSecrets decrypts a server's env and headers.
-func (s *Store) RevealMCPSecrets(name string) (map[string]string, error) {
-	if s.catalog == nil {
-		return nil, errors.New("tools are not initialized")
-	}
-	return s.catalog.mcp.RevealSecrets(name)
-}
-
-// MCPTools returns one server's tools with their approval status.
-func (s *Store) MCPTools(ctx context.Context, name string) ([]MCPToolView, error) {
-	if s.catalog == nil {
-		return nil, errors.New("tools are not initialized")
-	}
-	return s.catalog.mcp.Tools(ctx, name)
-}
-
-// ApproveMCPTool pins a tool's current definition hash.
-func (s *Store) ApproveMCPTool(ctx context.Context, server, tool, reviewedHash string) error {
-	if s.catalog == nil {
-		return errors.New("tools are not initialized")
-	}
-	return s.catalog.mcp.Approve(ctx, server, tool, reviewedHash)
-}
-
-// RevokeMCPTool removes an approval.
-func (s *Store) RevokeMCPTool(server, tool string) error {
-	if s.catalog == nil {
-		return errors.New("tools are not initialized")
-	}
-	return s.catalog.mcp.Revoke(server, tool)
-}
-
-// RefreshMCPServer redials a server on next use.
-func (s *Store) RefreshMCPServer(name string) error {
-	if s.catalog == nil {
-		return errors.New("tools are not initialized")
-	}
-	return s.catalog.mcp.Refresh(name)
-}
-
 // ConduitTools returns every conduit tool, enabled or not.
 func (s *Store) ConduitTools() ([]ConduitToolInfo, error) {
 	if s.catalog == nil {
 		return nil, errors.New("tools are not initialized")
 	}
 	return s.catalog.conduit.Info()
-}
-
-// CloseMCP disconnects every server session, terminating stdio child
-// processes. Called on shutdown so none is orphaned.
-func (s *Store) CloseMCP() {
-	if s.pool != nil {
-		s.pool.Close()
-	}
 }
 
 func (s *Store) Invalidate() {
@@ -427,17 +341,6 @@ func (s *Store) decrypt(ciphertext string) (string, error) {
 		return "", err
 	}
 	return string(plaintext), nil
-}
-
-// encrypt is the write side of decrypt, returning bare ciphertext. Callers
-// store it with the enc: marker, which is how a value is recognised as already
-// encrypted.
-func (s *Store) encrypt(plaintext string) (string, error) {
-	blob, err := security.Encrypt([]byte(plaintext), string(s.encryption))
-	if err != nil {
-		return "", err
-	}
-	return blob, nil
 }
 
 func (s *Store) Authenticate(ctx context.Context, presented string) (gateway.Key, error) {

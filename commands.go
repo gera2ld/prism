@@ -2,7 +2,6 @@ package main
 
 import (
 	"bytes"
-	"context"
 	"errors"
 	"os"
 	"strings"
@@ -91,64 +90,6 @@ func (c *Commands) ImportRoutesFromFile(path string, prune bool) error {
 	return c.ImportRoutes(data, prune)
 }
 
-// ListMCPServers returns all configured MCP servers (names, transports and
-// endpoints, never env or header values).
-func (c *Commands) ListMCPServers() ([]store.MCPServerInfo, error) {
-	return c.Store.MCPServers()
-}
-
-// RevealMCPSecrets decrypts a server's env and headers for copying.
-func (c *Commands) RevealMCPSecrets(name string) (map[string]string, error) {
-	if err := requireName("mcp server", name); err != nil {
-		return nil, err
-	}
-	return c.Store.RevealMCPSecrets(name)
-}
-
-// ListMCPTools returns one server's tools with their approval status,
-// including the live definition hash an approval would be pinned to.
-func (c *Commands) ListMCPTools(ctx context.Context, name string) ([]store.MCPToolView, error) {
-	if err := requireName("mcp server", name); err != nil {
-		return nil, err
-	}
-	return c.Store.MCPTools(ctx, name)
-}
-
-// ApproveMCPTool pins a tool's current definition hash. The reviewed hash is
-// required and must match what the server publishes now, so consent cannot be
-// extended to a definition that appeared after review.
-func (c *Commands) ApproveMCPTool(ctx context.Context, server, tool, reviewedHash string) error {
-	if err := requireName("mcp server", server); err != nil {
-		return err
-	}
-	if strings.TrimSpace(tool) == "" {
-		return errors.New("tool is required")
-	}
-	if strings.TrimSpace(reviewedHash) == "" {
-		return errors.New("definition_hash is required; read it from the server's tool list")
-	}
-	return c.Store.ApproveMCPTool(ctx, server, tool, reviewedHash)
-}
-
-// RevokeMCPTool removes an approval, hiding the tool from agents again.
-func (c *Commands) RevokeMCPTool(server, tool string) error {
-	if err := requireName("mcp server", server); err != nil {
-		return err
-	}
-	if strings.TrimSpace(tool) == "" {
-		return errors.New("tool is required")
-	}
-	return c.Store.RevokeMCPTool(server, tool)
-}
-
-// RefreshMCPServer disconnects a server so the next use redials and relists it.
-func (c *Commands) RefreshMCPServer(name string) error {
-	if err := requireName("mcp server", name); err != nil {
-		return err
-	}
-	return c.Store.RefreshMCPServer(name)
-}
-
 // ListTools returns every conduit tool, enabled or not.
 func (c *Commands) ListTools() ([]store.ConduitToolInfo, error) {
 	return c.Store.ConduitTools()
@@ -157,4 +98,11 @@ func (c *Commands) ListTools() ([]store.ConduitToolInfo, error) {
 // ValidateTool checks a conduit definition without saving it.
 func (c *Commands) ValidateTool(definition []byte) error {
 	return store.ValidateConduitDefinition(definition)
+}
+
+// ExportSchema renders the database's collections in the exact normalized shape
+// the binary embeds, so a re-export of an unchanged database is byte-identical
+// and shows no diff.
+func (c *Commands) ExportSchema() ([]byte, error) {
+	return store.ExportSchema(c.App)
 }

@@ -14,6 +14,9 @@ import (
 
 const (
 	toolsPath = "/v1/tools"
+	// TransportREST names this surface in tool_logs, so an invocation can be
+	// told apart from one that arrived over MCP.
+	TransportREST = "rest"
 	// invokeSuffix separates the tool name from the invoke verb.
 	invokeSuffix = "/invoke"
 	// maxToolBody bounds an invocation request. Arguments are small; a large
@@ -148,6 +151,7 @@ func (p *Proxy) handleToolInvoke(w http.ResponseWriter, r *http.Request, name st
 	if err != nil {
 		rec := ToolRecord{
 			StartedAt: start, KeyID: presented.ID, KeyName: presented.Name, Tool: name,
+			Transport:  TransportREST,
 			DurationMS: p.Now().Sub(start).Milliseconds(), Status: http.StatusInternalServerError,
 			Outcome: ToolOutcomeGatewayError, Error: "tool result is not encodable: " + err.Error(),
 		}
@@ -158,8 +162,8 @@ func (p *Proxy) handleToolInvoke(w http.ResponseWriter, r *http.Request, name st
 
 	rec := ToolRecord{
 		StartedAt: start, KeyID: presented.ID, KeyName: presented.Name, Tool: name,
-		Source: result.Source, Server: result.Server,
-		Outcome: ToolOutcomeCompleted, Status: http.StatusOK,
+		Transport: TransportREST,
+		Outcome:   ToolOutcomeCompleted, Status: http.StatusOK,
 		Result: string(encoded),
 	}
 	if result.IsError {
@@ -189,7 +193,8 @@ func (p *Proxy) handleToolInvoke(w http.ResponseWriter, r *http.Request, name st
 func (p *Proxy) writeToolFailure(w http.ResponseWriter, r *http.Request, start time.Time, presented Key, name string, args []byte, err error) {
 	rec := ToolRecord{
 		StartedAt: start, KeyID: presented.ID, KeyName: presented.Name, Tool: name,
-		Outcome: ToolOutcomeGatewayError, Status: http.StatusInternalServerError, Error: err.Error(),
+		Transport: TransportREST,
+		Outcome:   ToolOutcomeGatewayError, Status: http.StatusInternalServerError, Error: err.Error(),
 	}
 
 	status := http.StatusInternalServerError

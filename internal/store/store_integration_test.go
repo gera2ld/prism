@@ -287,6 +287,7 @@ func TestLogCachedTokensAndFinishReason(t *testing.T) {
 		ProviderID: providerID, ProviderName: "prov", UpstreamModel: "gpt-x",
 		TotalMS: 12, Status: 200, Outcome: gateway.OutcomeCompleted,
 	}
+	// Absent usage stays NULL rather than becoming a misleading zero.
 	full := base
 	full.Usage = gateway.Usage{TotalTokens: &total, CachedTokens: &cached}
 	full.Outcome = gateway.OutcomeClientDisconnected
@@ -295,7 +296,6 @@ func TestLogCachedTokensAndFinishReason(t *testing.T) {
 	if err := sink.Write(context.Background(), full); err != nil {
 		t.Fatalf("write log: %v", err)
 	}
-	// Absent upstream data stays NULL, not zero.
 	if err := sink.Write(context.Background(), base); err != nil {
 		t.Fatalf("write bare log: %v", err)
 	}
@@ -453,10 +453,10 @@ func TestUsageViewsZeroCountsForUnusedRows(t *testing.T) {
 		t.Fatalf("expected 1 provider usage row, got %d", len(records))
 	}
 	row := records[0]
+	// Zeroed counts, not NULL, and no last_used.
 	if row.GetString("id") != providerID {
 		t.Fatalf("unexpected provider row %q", row.GetString("id"))
 	}
-	// No logs yet: zeroed counts, not NULL, and no last_used.
 	if got := row.GetInt("success_requests"); got != 0 {
 		t.Fatalf("success_requests = %d, want 0", got)
 	}
@@ -465,77 +465,6 @@ func TestUsageViewsZeroCountsForUnusedRows(t *testing.T) {
 	}
 	if got := row.GetString("last_used"); got != "null" {
 		t.Fatalf("last_used = %q, want NULL", got)
-	}
-}
-
-// There are no follow-up migrations, so a fresh install is the only place
-// createAll can silently drift from the deployed schema.
-func TestCreateAllProducesCurrentSchema(t *testing.T) {
-	app := newTestApp(t)
-
-	logs, err := app.FindCollectionByNameOrId("request_logs")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, ok := logs.Fields.GetByName("started_at").(*core.DateField); !ok {
-		t.Fatalf("missing started_at DateField, got %#v", logs.Fields.GetByName("started_at"))
-	}
-	outcome, ok := logs.Fields.GetByName("outcome").(*core.TextField)
-	if !ok || outcome.Max != 32 {
-		t.Fatalf("unexpected outcome field: %#v", logs.Fields.GetByName("outcome"))
-	}
-
-	for _, name := range []string{"providers", "api_keys", "routes", "transformers", settingsCollection} {
-		collection, err := app.FindCollectionByNameOrId(name)
-		if err != nil {
-			t.Fatal(err)
-		}
-		for _, field := range []string{"created", "updated"} {
-			if _, ok := collection.Fields.GetByName(field).(*core.AutodateField); !ok {
-				t.Fatalf("%s: missing %s AutodateField", name, field)
-			}
-		}
-	}
-
-	// The split views must expose both counts and no longer the total.
-	for _, view := range usageViews {
-		for _, column := range []string{"success_requests", "fail_requests"} {
-			if _, err := app.DB().NewQuery(
-				"SELECT " + column + " FROM {{" + view.name + "}} LIMIT 1").Execute(); err != nil {
-				t.Fatalf("%s: expected column %s: %v", view.name, column, err)
-			}
-		}
-		if _, err := app.DB().NewQuery(
-			"SELECT total_requests FROM {{" + view.name + "}} LIMIT 1").Execute(); err == nil {
-			t.Fatalf("%s: total_requests should have been replaced by the split", view.name)
-		}
-	}
-
-	// The schema is walked forward by these migrations in order and nothing
-	// else: a fresh install must reach the deployed shape without a
-	// hand-patched database.
-	var migrations []struct {
-		File string `db:"file"`
-	}
-	if err := app.DB().NewQuery(
-		"SELECT file FROM _migrations WHERE file LIKE '18000000%' ORDER BY file").
-		All(&migrations); err != nil {
-		t.Fatal(err)
-	}
-	want := []string{"1800000000_gateway.go", "1800000001_tools.go"}
-	if len(migrations) != len(want) {
-		t.Fatalf("expected project migrations %v, got %v", want, migrations)
-	}
-	for i, name := range want {
-		if migrations[i].File != name {
-			t.Fatalf("migration %d = %q, want %q (all: %v)", i, migrations[i].File, name, migrations)
-		}
-	}
-
-	// The tools surface's own view is registered by the second migration,
-	// because tool_logs does not exist yet when createAll runs.
-	if _, err := app.FindCollectionByNameOrId("tools_usage"); err != nil {
-		t.Fatalf("tools_usage view: %v", err)
 	}
 }
 
@@ -582,7 +511,6 @@ func TestSettingsLiveToggle(t *testing.T) {
 		t.Fatalf("expected updated cron, got %q", s.RetentionCron())
 	}
 
-	// Flip back off.
 	settings[0].Set("capture_bodies", false)
 	if err := app.Save(settings[0]); err != nil {
 		t.Fatal(err)
@@ -612,70 +540,54 @@ func TestRetentionScheduleUpdate(t *testing.T) {
 	}
 }
 
-func TestReconcileSettings(t *testing.T) {
+// The gateway_settings row is data, so it is seeded on start: backfilled with
+// defaults when blank, and recreated outright if deleted. The collection's shape
+// is the snapshot's business, covered in schema_test.go.
+func TestSeedSettingsRow(t *testing.T) {
 	app := newTestApp(t)
 	s, err := Open(app, nil)
 	if err != nil {
-		t.Fatal(err)
-	}
-
-	// Simulate an older database: drop a current field, leave behind a
-	// redundant one.
-	collection, err := app.FindCollectionByNameOrId("gateway_settings")
-	if err != nil {
-		t.Fatal(err)
-	}
-	collection.Fields.RemoveByName("retention_cron")
-	collection.Fields.Add(&core.TextField{Name: "legacy_flag"})
-	if err := app.Save(collection); err != nil {
 		t.Fatal(err)
 	}
 	rows, err := app.FindAllRecords("gateway_settings")
 	if err != nil {
 		t.Fatal(err)
 	}
-	rows[0].Set("legacy_flag", "junk")
+	if len(rows) != 1 {
+		t.Fatalf("expected 1 settings row, got %d", len(rows))
+	}
+	if got := rows[0].GetInt("retention_hours"); got != 24 {
+		t.Fatalf("retention_hours = %d, want the default 24", got)
+	}
+
+	// Re-seeding leaves an operator's values alone. The numeric and cron fields
+	// are required, so a blank cannot be represented here; the backfill in
+	// readSettings only matters for a field newly added by the snapshot, and
+	// PocketBase fills absent columns itself.
+	rows[0].Set("retention_hours", 72)
+	rows[0].Set("retention_cron", "5 4 * * *")
 	if err := app.Save(rows[0]); err != nil {
 		t.Fatal(err)
 	}
-
-	if err := s.reconcileSettings(); err != nil {
+	if err := s.seedSettings(); err != nil {
 		t.Fatal(err)
 	}
-
-	collection, err = app.FindCollectionByNameOrId("gateway_settings")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if collection.Fields.GetByName("retention_cron") == nil {
-		t.Fatal("expected retention_cron field to be regenerated")
-	}
-	if collection.Fields.GetByName("legacy_flag") != nil {
-		t.Fatal("expected redundant legacy_flag field to be removed")
-	}
-	if collection.Fields.GetByName("id") == nil {
-		t.Fatal("system id field must survive reconciliation")
-	}
-
 	rows, err = app.FindAllRecords("gateway_settings")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(rows) != 1 {
-		t.Fatalf("expected 1 settings row, got %d", len(rows))
+	if got := rows[0].GetInt("retention_hours"); got != 72 {
+		t.Fatalf("an existing value must be preserved, got %d", got)
 	}
-	if got := rows[0].GetString("retention_cron"); got != "0 3 * * *" {
-		t.Fatalf("expected default cron backfill, got %q", got)
-	}
-	if got := rows[0].GetInt("retention_hours"); got != 24 {
-		t.Fatalf("existing value must be preserved, got %d", got)
+	if got := rows[0].GetString("retention_cron"); got != "5 4 * * *" {
+		t.Fatalf("an existing value must be preserved, got %q", got)
 	}
 
 	// A deleted singleton row is recreated with defaults.
 	if err := app.Delete(rows[0]); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.reconcileSettings(); err != nil {
+	if err := s.seedSettings(); err != nil {
 		t.Fatal(err)
 	}
 	rows, err = app.FindAllRecords("gateway_settings")
@@ -685,7 +597,7 @@ func TestReconcileSettings(t *testing.T) {
 	if len(rows) != 1 || rows[0].GetInt("retention_hours") != 24 ||
 		rows[0].GetString("retention_cron") != "0 3 * * *" ||
 		rows[0].GetBool("capture_bodies") {
-		t.Fatalf("expected defaults-regenerated row, got %+v", rows[0])
+		t.Fatalf("expected a defaults-regenerated row, got %+v", rows[0])
 	}
 }
 

@@ -20,9 +20,8 @@ func TestPrismAPISpec(t *testing.T) {
 	var spec struct {
 		OpenAPI string `json:"openapi"`
 		Paths   map[string]struct {
-			Get    *struct{} `json:"get"`
-			Post   *struct{} `json:"post"`
-			Delete *struct{} `json:"delete"`
+			Get  *struct{} `json:"get"`
+			Post *struct{} `json:"post"`
 		} `json:"paths"`
 		Servers []struct {
 			URL string `json:"url"`
@@ -40,23 +39,18 @@ func TestPrismAPISpec(t *testing.T) {
 		t.Fatal("missing openapi version")
 	}
 	want := map[string][]string{
-		"/api/prism/keys":                                    {"get", "post"},
-		"/api/prism/keys/{name}/reveal":                      {"get"},
-		"/api/prism/providers":                               {"get"},
-		"/api/prism/providers/{name}/reveal":                 {"get"},
-		"/api/prism/routes/export":                           {"get"},
-		"/api/prism/routes/import":                           {"post"},
-		"/v1/chat/completions":                               {"post"},
-		"/v1/models":                                         {"get"},
-		"/v1/tools":                                          {"get"},
-		"/v1/tools/{name}/invoke":                            {"post"},
-		"/api/prism/tools":                                   {"get"},
-		"/api/prism/tools/validate":                          {"post"},
-		"/api/prism/mcp-servers":                             {"get"},
-		"/api/prism/mcp-servers/{name}/tools":                {"get"},
-		"/api/prism/mcp-servers/{name}/tools/{tool}/approve": {"post", "delete"},
-		"/api/prism/mcp-servers/{name}/reveal":               {"get"},
-		"/api/prism/mcp-servers/{name}/refresh":              {"post"},
+		"/api/prism/keys":                    {"get", "post"},
+		"/api/prism/keys/{name}/reveal":      {"get"},
+		"/api/prism/providers":               {"get"},
+		"/api/prism/providers/{name}/reveal": {"get"},
+		"/api/prism/routes/export":           {"get"},
+		"/api/prism/routes/import":           {"post"},
+		"/v1/chat/completions":               {"post"},
+		"/v1/models":                         {"get"},
+		"/v1/tools":                          {"get"},
+		"/v1/tools/{name}/invoke":            {"post"},
+		"/api/prism/tools":                   {"get"},
+		"/api/prism/tools/validate":          {"post"},
 	}
 	for path, methods := range want {
 		got, ok := spec.Paths[path]
@@ -70,8 +64,6 @@ func TestPrismAPISpec(t *testing.T) {
 				present = got.Get != nil
 			case "post":
 				present = got.Post != nil
-			case "delete":
-				present = got.Delete != nil
 			}
 			if !present {
 				t.Fatalf("spec path %s missing %s", path, m)

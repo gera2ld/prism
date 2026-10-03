@@ -115,39 +115,29 @@ type LogSink interface {
 	Write(context.Context, Record) error
 }
 
-// ToolSource identifies where a tool definition came from.
-type ToolSource string
+// Version identifies Prism to the systems it calls: the User-Agent a conduit
+// tool sends, and the client identity an MCP peer sees. It lives here because
+// both the store and the MCP server need it and gateway is the one package
+// neither has to avoid.
+const Version = "1.0.0"
 
-const (
-	SourceConduit ToolSource = "conduit"
-	SourceMCP     ToolSource = "mcp"
-)
-
-// Tool is one callable tool as the agent sees it. Name is the callable
-// identity: a conduit record name, or mcp__<server>__<tool> for MCP tools.
-// Names are restricted to [a-zA-Z0-9_-] so they address a path segment and
-// satisfy OpenAI's function-name rule.
+// Tool is one callable tool as the agent sees it. Name is the callable identity:
+// a conduit record name. Names are restricted to [a-zA-Z0-9_-] so they address a
+// path segment and satisfy OpenAI's function-name rule.
 type Tool struct {
 	Name        string
 	Description string
 	// InputSchema is a JSON Schema object describing the arguments. It is
 	// empty only for a source that publishes no schema at all.
 	InputSchema json.RawMessage
-	Source      ToolSource
-	// Server is the MCP server name, empty for conduit tools.
-	Server string
 }
 
 // ToolResult is the outcome of one invocation. IsError marks a tool that ran
 // and failed, which is deliberately not a transport error: the agent feeds
 // both cases back as a tool message, so a failing tool must still answer 200.
-// Source and Server identify which source answered, so the caller can log the
-// provenance without asking the registry a second time.
 type ToolResult struct {
 	Result  any
 	IsError bool
-	Source  ToolSource
-	Server  string
 }
 
 // ToolRegistry resolves and executes tools. Key is the presented client key:
@@ -170,13 +160,13 @@ const (
 
 // ToolRecord is one invocation written after it completes or fails. Args and
 // Result carry the captured payload and are empty unless body capture is on.
+// Transport records which surface the call arrived on.
 type ToolRecord struct {
 	StartedAt  time.Time
 	KeyID      string
 	KeyName    string
 	Tool       string
-	Source     ToolSource
-	Server     string
+	Transport  string
 	Args       string
 	Result     string
 	Truncated  bool

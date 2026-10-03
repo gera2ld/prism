@@ -17,6 +17,12 @@ import (
 	"github.com/gera2ld/prism/internal/gateway"
 )
 
+// The collections behind the tools surface. Names are shared with the
+// migration that creates them.
+const toolsCollection = "tools"
+
+const toolLogsCollection = "tool_logs"
+
 // conduitRegistry serves the operator-authored tool source. A conduit
 // definition is already a function-calling spec — it carries name,
 // description and input_schema, and the engine validates incoming arguments
@@ -38,9 +44,6 @@ type conduitRegistry struct {
 	loaded bool
 }
 
-// Version identifies Prism to the systems it calls.
-const Version = "1.0.0"
-
 // defaultConduitHeaders go on every outbound request a conduit tool makes.
 //
 // Go's HTTP client sends no User-Agent at all unless one is set, and plenty of
@@ -50,7 +53,7 @@ const Version = "1.0.0"
 // form for containing parentheses or an @, so adding contact details here would
 // get the request blocked instead. A step's own headers still win, so a tool
 // that wants richer identification can say so where it is written.
-var defaultConduitHeaders = map[string]string{"User-Agent": "Prism/" + Version}
+var defaultConduitHeaders = map[string]string{"User-Agent": "Prism/" + gateway.Version}
 
 type conduitTool struct {
 	name   string
@@ -89,7 +92,6 @@ func (r *conduitRegistry) List() ([]gateway.Tool, error) {
 			Name:        t.name,
 			Description: t.def.Description,
 			InputSchema: t.schema,
-			Source:      gateway.SourceConduit,
 		})
 	}
 	return out, nil
@@ -125,12 +127,12 @@ func (r *conduitRegistry) Call(ctx context.Context, name string, args json.RawMe
 	if err != nil {
 		return failed(err.Error()), nil
 	}
-	return gateway.ToolResult{Result: out, Source: gateway.SourceConduit}, nil
+	return gateway.ToolResult{Result: out}, nil
 }
 
 // failed builds the result of a tool that ran and reported failure.
 func failed(reason string) gateway.ToolResult {
-	return gateway.ToolResult{Result: reason, IsError: true, Source: gateway.SourceConduit}
+	return gateway.ToolResult{Result: reason, IsError: true}
 }
 
 // load returns enabled tools with their definitions parsed. Parsing happens
