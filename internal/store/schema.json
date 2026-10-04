@@ -811,19 +811,19 @@
         "type": "text"
       },
       {
-        "autogeneratePattern": "",
         "help": "",
         "hidden": false,
-        "id": "text3675434334",
-        "max": 32,
-        "min": 0,
+        "id": "select1000000001",
+        "maxSelect": 1,
         "name": "endpoint_type",
-        "pattern": "",
         "presentable": false,
-        "primaryKey": false,
         "required": false,
         "system": false,
-        "type": "text"
+        "type": "select",
+        "values": [
+          "chat",
+          "image"
+        ]
       },
       {
         "help": "",
@@ -951,19 +951,19 @@
         "type": "bool"
       },
       {
-        "autogeneratePattern": "",
         "help": "",
         "hidden": false,
-        "id": "text3675434334",
-        "max": 32,
-        "min": 0,
+        "id": "select1000000001",
+        "maxSelect": 1,
         "name": "endpoint_type",
-        "pattern": "",
         "presentable": false,
-        "primaryKey": false,
         "required": false,
         "system": false,
-        "type": "text"
+        "type": "select",
+        "values": [
+          "chat",
+          "image"
+        ]
       }
     ],
     "id": "pbc_96911357",
@@ -977,7 +977,7 @@
     "id": "pbc_2198965770",
     "name": "routes_usage",
     "type": "view",
-    "viewQuery": "SELECT r.id AS id, r.alias AS alias, r.endpoint_type AS endpoint_type, r.provider AS provider, r.upstream_model AS upstream_model, MAX(COALESCE(NULLIF(l.started_at, ''), l.created)) AS last_used, COUNT(CASE WHEN l.outcome = 'completed' THEN 1 END) AS success_requests, COUNT(CASE WHEN l.outcome \u003c\u003e 'completed' THEN 1 END) AS fail_requests FROM routes AS r LEFT JOIN request_logs AS l ON l.alias = r.alias AND l.endpoint_type = r.endpoint_type AND l.provider = r.provider AND l.upstream_model = r.upstream_model GROUP BY r.id, r.alias, r.endpoint_type, r.provider, r.upstream_model"
+    "viewQuery": "SELECT r.id AS id, r.endpoint_type AS endpoint_type, r.alias AS alias, r.provider AS provider, r.upstream_model AS upstream_model, MAX(COALESCE(NULLIF(l.started_at, ''), l.created)) AS last_used, COUNT(CASE WHEN l.outcome = 'completed' THEN 1 END) AS success_requests, COUNT(CASE WHEN l.outcome \u003c\u003e 'completed' THEN 1 END) AS fail_requests FROM routes AS r LEFT JOIN request_logs AS l ON l.alias = r.alias AND l.endpoint_type = r.endpoint_type AND l.provider = r.provider AND l.upstream_model = r.upstream_model GROUP BY r.id, r.endpoint_type, r.alias, r.provider, r.upstream_model"
   },
   {
     "fields": [

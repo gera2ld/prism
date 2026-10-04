@@ -166,7 +166,7 @@ Everything lives in the admin UI; edits apply without a restart.
 | Area | What it does |
 | --- | --- |
 | `providers` | Upstreams: name, base URL, token, on/off switch |
-| `routes` | Alias → provider + upstream model per endpoint kind (`chat`/`image`), with priority |
+| `routes` | Alias → provider + upstream model per endpoint kind (`endpoint_type`: `chat`/`image`), with priority |
 | `api_keys` | Client keys, on/off switch, optional RE2 allowlists (`alias_pattern`, `provider_pattern`, `model_pattern`; empty means unrestricted) |
 | `transformers` | JSONata reshaping per provider + model pattern, first match wins |
 | `gateway_settings` | Body-capture toggle, capture retention, cleanup schedule |

@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"os"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -1190,7 +1191,7 @@ func TestRouteEndpointDefaultsAndValidation(t *testing.T) {
 		t.Fatalf("endpoint_type = %q, want chat", got)
 	}
 
-	// Unknown kinds are rejected at save time.
+	// Unknown kinds are refused by the select enum itself.
 	collection, err := app.FindCollectionByNameOrId("routes")
 	if err != nil {
 		t.Fatal(err)
@@ -1202,7 +1203,38 @@ func TestRouteEndpointDefaultsAndValidation(t *testing.T) {
 	bad.Set("endpoint_type", "video")
 	bad.Set("enabled", true)
 	if err := app.Save(bad); err == nil {
-		t.Fatal("expected save-time rejection of unknown endpoint_type")
+		t.Fatal("expected rejection of unknown endpoint_type")
+	}
+}
+
+func TestRouteEndpointIsAnEnum(t *testing.T) {
+	app := newTestApp(t)
+	if _, err := Open(app, nil); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"routes", "request_logs"} {
+		collection, err := app.FindCollectionByNameOrId(name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		field := collection.Fields.GetByName("endpoint_type")
+		if field == nil {
+			t.Fatalf("%s has no endpoint_type field", name)
+		}
+		if field.Type() != "select" {
+			t.Fatalf("%s.endpoint_type is %q, want select", name, field.Type())
+		}
+		selectField, ok := field.(*core.SelectField)
+		if !ok {
+			t.Fatalf("%s.endpoint_type is not a SelectField", name)
+		}
+		if selectField.MaxSelect != 1 {
+			t.Fatalf("%s.endpoint_type allows %d values, want a single kind", name, selectField.MaxSelect)
+		}
+		want := []string{"chat", "image"}
+		if !slices.Equal(selectField.Values, want) {
+			t.Fatalf("%s.endpoint_type values = %v, want %v", name, selectField.Values, want)
+		}
 	}
 }
 

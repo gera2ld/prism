@@ -6,7 +6,6 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
-	"fmt"
 	"log/slog"
 	"os"
 	"slices"
@@ -166,14 +165,11 @@ func Open(app core.App, logger *slog.Logger) (*Store, error) {
 	app.OnRecordCreate("api_keys").Bind(validateKeyPolicy)
 	app.OnRecordUpdate("api_keys").Bind(validateKeyPolicy)
 
-	// routes: an empty endpoint_type defaults to chat; anything outside the
-	// gateway's known endpoint kinds is rejected, so a typo can never
-	// persist as an unreachable route.
+	// routes: the endpoint_type enum validates the kind; this hook only
+	// defaults an unset one to chat.
 	normalizeRoute := &hook.Handler[*core.RecordEvent]{
 		Func: func(e *core.RecordEvent) error {
-			if err := normalizeRouteEndpoint(e.Record); err != nil {
-				return err
-			}
+			normalizeRouteEndpoint(e.Record)
 			return e.Next()
 		},
 	}
@@ -616,17 +612,14 @@ func (s *Store) loadRoutes() error {
 	return nil
 }
 
-// normalizeRouteEndpoint defaults an empty endpoint_type to chat and rejects
-// unknown kinds at save time.
-func normalizeRouteEndpoint(record *core.Record) error {
-	switch record.GetString("endpoint_type") {
-	case "", string(gateway.EndpointChat):
+// normalizeRouteEndpoint defaults an empty endpoint_type to chat, so a route
+// saved without picking a kind is a chat route. The field itself is a select
+// enum, so the admin UI offers the kinds and rejects anything else; this hook
+// only supplies the default.
+func normalizeRouteEndpoint(record *core.Record) {
+	if record.GetString("endpoint_type") == "" {
 		record.Set("endpoint_type", string(gateway.EndpointChat))
-	case string(gateway.EndpointImage):
-	default:
-		return fmt.Errorf("unknown endpoint_type %q: want chat or image", record.GetString("endpoint_type"))
 	}
-	return nil
 }
 
 // backfillRouteEndpoints fills endpoint_type on rows written before the

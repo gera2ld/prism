@@ -79,6 +79,13 @@ selects columns that still exist, so a boot where the schema did not change leav
 untouched. A view the snapshot does not declare is left for the import to delete, since deleting
 one is never blocked by the column it selects.
 
+The same ordering applies when a snapshot changes a column's type rather than dropping it, because
+PocketBase converts a field by dropping and re-adding the column: turning `routes.endpoint_type` from
+text into a select enum drops the column `routes_usage` selects. Here the view query text has to
+change too, even where the projection is equivalent, because only a rewritten query marks the view
+as stale enough to drop first. An out-of-enum value cannot survive the import either, so an enum is
+only safe to introduce once every existing value is one of its members.
+
 ### `providers`
 
 An upstream that speaks OpenAI-compatible HTTP.
@@ -97,7 +104,7 @@ Maps an alias to a concrete model on a concrete provider, for one endpoint kind.
 | Field | Notes |
 | --- | --- |
 | `alias` | What clients send in `model` |
-| `endpoint_type` | `chat` or `image`; a chat alias and an image alias never share targets even when named alike |
+| `endpoint_type` | `chat` or `image`, a select enum; a chat alias and an image alias never share targets even when named alike. Unset means chat |
 | `provider` | Relation to `providers` |
 | `upstream_model` | The name the provider actually expects |
 | `priority` | Lower wins; ties broken arbitrarily |
