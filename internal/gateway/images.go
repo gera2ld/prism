@@ -236,8 +236,9 @@ func (p *Proxy) relayImage(ctx context.Context, w http.ResponseWriter, upstream 
 		// Inline base64 outputs are persisted as files by the store, so the
 		// captured response text carries blanks instead of megabytes of
 		// base64. Items that failed to decode keep their payload in text.
+		// rec.Images may already hold uploaded edit inputs; outputs append.
 		files, redacted := extractImageFiles(rec.Alias, completion.Data)
-		rec.Images = files
+		rec.Images = append(rec.Images, files...)
 		responseBody := body
 		if redacted != nil {
 			redactedCompletion := completion
@@ -322,6 +323,7 @@ func extractImageFiles(alias string, data []imageDatum) ([]GeneratedImage, []ima
 			Data:      raw,
 			Name:      fmt.Sprintf("%s-%d.%s", base, i, ext),
 			MediaType: mediaType,
+			Kind:      ImageKindOutput,
 		})
 		redacted[i].B64JSON = ""
 	}

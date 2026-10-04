@@ -53,6 +53,8 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		p.handleImages(w, r)
 	case r.URL.Path == generationsPath && r.Method == http.MethodPost:
 		p.handleImageGenerations(w, r)
+	case r.URL.Path == editsPath && r.Method == http.MethodPost:
+		p.handleImageEdits(w, r)
 	case r.URL.Path == toolsPath && r.Method == http.MethodGet:
 		p.handleTools(w, r)
 	case p.serveToolInvoke(w, r):

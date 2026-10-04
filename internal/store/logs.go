@@ -110,6 +110,7 @@ func (l *LogStore) saveImages(ctx context.Context, logID string, images []gatewa
 		record.Set("image", file)
 		record.Set("media_type", img.MediaType)
 		record.Set("position", i)
+		record.Set("kind", img.Kind)
 		if err := l.app.SaveWithContext(ctx, record); err != nil {
 			return err
 		}

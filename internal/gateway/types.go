@@ -123,12 +123,20 @@ type Bodies struct {
 // GeneratedImage is one decoded image output awaiting persistence. Data
 // holds the raw bytes, Name is a sanitized filename with an extension
 // derived from the media type, and MediaType is the provider-reported or
-// sniffed MIME type.
+// sniffed MIME type. Kind is "input" for uploaded edit images and "output"
+// for generated ones.
 type GeneratedImage struct {
 	Data      []byte
 	Name      string
 	MediaType string
+	Kind      string
 }
+
+// Image file kinds stored in request_images.
+const (
+	ImageKindInput  = "input"
+	ImageKindOutput = "output"
+)
 
 type Record struct {
 	StartedAt     time.Time

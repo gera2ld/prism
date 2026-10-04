@@ -135,11 +135,13 @@ Optional debugging payload, one row per logged request, deleted on a schedule.
 Generated image outputs, one row per image in response order, written only when
 body capture is on and expired by the same retention schedule.
 
-`log` (relation), `image` (file), `media_type`, `position`. Inline base64
+`log` (relation), `image` (file), `media_type`, `position`, `kind` (`input` for
+uploaded edit images, `output` for generated ones). Inline base64
 payloads are decoded into `image` files instead of living as text: the
 captured `request_bodies.response` keeps the structure with saved payloads
 blanked. URL outputs are never downloaded, only base64 ones are stored.
-Deletion goes through the record API rather than raw SQL, so the files leave
+An edits request itself is captured as a summary (text fields plus uploaded
+filenames), never binary. Deletion goes through the record API rather than raw SQL, so the files leave
 the disk together with their rows.
 
 ### `api_keys`
@@ -315,6 +317,7 @@ and a log sink, which is why it can be tested against in-process transports with
 
 - `POST /v1/chat/completions` — streaming and non-streaming.
 - `POST /v1/images/generations` — image generation in OpenAI's shape, non-streaming.
+- `POST /v1/images/edits` — image edits in OpenAI's multipart shape, non-streaming. Request transformers do not apply to multipart bodies.
 - `POST /v1/images` — image generation in OpenRouter's shape, non-streaming; kept for OpenRouter-backed providers.
 - `GET /v1/models` — the enabled aliases, in OpenAI's shape.
 - `GET /v1/tools` — the tools this key may call, in OpenAI's tool shape so an agent can hand the

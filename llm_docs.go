@@ -156,8 +156,7 @@ var openAIImageRequestSchema = &huma.Schema{
 	AdditionalProperties: true,
 }
 
-var openAIImageResponseSchema = objProp("Image generation result, relayed byte-identical from the upstream.", nil, map[string]*huma.Schema{
-	"created": intProp("Unix timestamp when the image was generated."),
+var openAIImageResponseSchema = objProp("Image generation result, relayed byte-identical from the upstream.", nil, map[string]*huma.Schema{"created": intProp("Unix timestamp when the image was generated."),
 	"data": {Type: "array", Description: "Generated images.", Items: objProp("One image.", nil, map[string]*huma.Schema{
 		"url":            strProp("URL of the generated image, when response_format is url."),
 		"b64_json":       strProp("Base64-encoded image bytes, when response_format is b64_json."),
@@ -168,6 +167,15 @@ var openAIImageResponseSchema = objProp("Image generation result, relayed byte-i
 		"completion_tokens": intProp("Completion tokens."),
 		"total_tokens":      intProp("Total tokens."),
 	}),
+})
+
+var editsRequestSchema = objProp("Multipart image edit. Only model, prompt and image are read by the gateway; every other field and file passes through untouched. The model names a Prism alias backed by an image route and is rewritten to the upstream model before forwarding to {base_url}/images/edits.", []string{"model", "prompt", "image"}, map[string]*huma.Schema{
+	"model":  strProp("Prism alias as configured in the routing table, e.g. fast-image."),
+	"prompt": strProp("Text description of the desired edit."),
+	"image":  {Type: "string", Format: "binary", Description: "The image to edit, as a PNG file."},
+	"mask":   {Type: "string", Format: "binary", Description: "Optional mask: transparent areas are edited, opaque areas kept."},
+	"n":      intProp("Number of images to generate."),
+	"size":   strProp("Image size, e.g. 1024x1024. Supported values depend on the upstream model."),
 })
 
 var gatewayErrorSchema = objProp("Gateway error envelope.", nil, map[string]*huma.Schema{
@@ -315,6 +323,31 @@ func registerLLMDocs(api huma.API) {
 				responses := gatewayErrorResponses()
 				responses["200"] = &huma.Response{
 					Description: "Generated images as URLs or base64 bytes.",
+					Content: map[string]*huma.MediaType{
+						"application/json": {Schema: openAIImageResponseSchema},
+					},
+				}
+				return responses
+			}(),
+		},
+	}
+	openAPI.Paths["/v1/images/edits"] = &huma.PathItem{
+		Post: &huma.Operation{
+			OperationID: "create-image-edit",
+			Summary:     "Edit images (OpenAI shape)",
+			Description: "Image edits over the configured providers, in OpenAI's multipart images/edits shape. The model field names a Prism alias backed by an image route; uploaded images are forwarded with the model rewritten, and responses are relayed byte-identical from the upstream. Request transformers do not apply to multipart bodies.",
+			Tags:        []string{"llm"},
+			Security:    clientKeySecurity,
+			RequestBody: &huma.RequestBody{
+				Required: true,
+				Content: map[string]*huma.MediaType{
+					"multipart/form-data": {Schema: editsRequestSchema},
+				},
+			},
+			Responses: func() map[string]*huma.Response {
+				responses := gatewayErrorResponses()
+				responses["200"] = &huma.Response{
+					Description: "Edited images as URLs or base64 bytes.",
 					Content: map[string]*huma.MediaType{
 						"application/json": {Schema: openAIImageResponseSchema},
 					},

@@ -203,6 +203,12 @@ func Open(app core.App, logger *slog.Logger) (*Store, error) {
 		return nil, err
 	}
 
+	// Rows written before the kind column existed are all generated
+	// outputs. Fill them so the admin UI can tell inputs from outputs.
+	if err := backfillImageKinds(app); err != nil {
+		return nil, err
+	}
+
 	// The gateway_settings row is data rather than schema, so it is seeded here.
 	if err := s.seedSettings(); err != nil {
 		return nil, err
@@ -636,6 +642,22 @@ func backfillRouteEndpoints(app core.App) error {
 	}
 	_, err = app.DB().NewQuery(
 		"UPDATE {{routes}} SET [[endpoint_type]] = 'chat' WHERE [[endpoint_type]] IS NULL OR [[endpoint_type]] = ''",
+	).Execute()
+	return err
+}
+
+// backfillImageKinds fills kind on image rows written before the column
+// existed. Every such row is a generated output.
+func backfillImageKinds(app core.App) error {
+	collection, err := app.FindCollectionByNameOrId("request_images")
+	if err != nil {
+		return err
+	}
+	if collection.Fields.GetByName("kind") == nil {
+		return nil
+	}
+	_, err = app.DB().NewQuery(
+		"UPDATE {{request_images}} SET [[kind]] = 'output' WHERE [[kind]] IS NULL OR [[kind]] = ''",
 	).Execute()
 	return err
 }

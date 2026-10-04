@@ -86,6 +86,19 @@ files (the captured response text keeps blanks instead of megabytes of base64) a
 with the same retention schedule. `GET /v1/models` advertises per-alias
 `supported_endpoint_types` in new-api's vocabulary (`openai`, `image-generation`).
 
+Image edits take OpenAI's multipart shape on the same image routes:
+
+```bash
+curl http://localhost:8090/v1/images/edits \
+  -H "Authorization: Bearer sk-…" \
+  -F model="<image-alias>" -F prompt="add a red panda astronaut" \
+  -F image=@original.png
+```
+
+Uploaded `image`/`mask` parts forward untouched with only the model rewritten; with capture
+on they are stored as `request_images` input files, and the captured request is a summary
+of fields and filenames, never binary. Request transformers do not apply to multipart bodies.
+
 ## Tools
 
 Prism can hand an agent the tools it is allowed to call, and run one on request. It does

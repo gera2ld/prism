@@ -1,12 +1,16 @@
 package gateway_test
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
+	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
+	"net/textproto"
 	"strings"
 	"testing"
 	"time"
@@ -1392,5 +1396,314 @@ func TestProxyImagesFilenameSanitizesAlias(t *testing.T) {
 	got := sink.records[0]
 	if len(got.Images) != 1 || got.Images[0].Name != "qwen_qwen3_free-0.jpg" {
 		t.Fatalf("unexpected files %+v", got.Images)
+	}
+}
+
+func newEditRequest(t *testing.T, fields map[string]string, files map[string]editFile) (*bytes.Buffer, string) {
+	t.Helper()
+	var buf bytes.Buffer
+	writer := multipart.NewWriter(&buf)
+	for k, v := range fields {
+		if err := writer.WriteField(k, v); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for field, f := range files {
+		h := make(textproto.MIMEHeader)
+		h.Set("Content-Disposition", fmt.Sprintf(`form-data; name="%s"; filename="%s"`, field, f.filename))
+		h.Set("Content-Type", f.contentType)
+		part, err := writer.CreatePart(h)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := part.Write(f.data); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := writer.Close(); err != nil {
+		t.Fatal(err)
+	}
+	return &buf, writer.FormDataContentType()
+}
+
+type editFile struct {
+	filename    string
+	contentType string
+	data        []byte
+}
+
+func TestProxyImageEditsPassthrough(t *testing.T) {
+	var seenModel, seenPrompt, seenSize, seenFilename, seenContentType string
+	var seenImage []byte
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/images/edits" {
+			t.Errorf("upstream path = %q, want /images/edits", r.URL.Path)
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		if err := r.ParseMultipartForm(32 << 20); err != nil {
+			t.Errorf("parse upstream multipart: %v", err)
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		seenModel = r.FormValue("model")
+		seenPrompt = r.FormValue("prompt")
+		seenSize = r.FormValue("size")
+		fhs := r.MultipartForm.File["image"]
+		if len(fhs) != 1 {
+			t.Errorf("upstream got %d image files", len(fhs))
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		seenFilename = fhs[0].Filename
+		seenContentType = fhs[0].Header.Get("Content-Type")
+		src, _ := fhs[0].Open()
+		seenImage, _ = io.ReadAll(src)
+		_ = src.Close()
+		if got := r.Header.Get("Authorization"); got != "Bearer upstream-key" {
+			w.WriteHeader(http.StatusUnauthorized)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"created": 1748372400,
+			"data": []any{map[string]any{
+				"b64_json":   "ZWRpdGVk",
+				"media_type": "image/png",
+			}},
+			"usage": map[string]any{"total_tokens": 100, "cost": 0.02},
+		})
+	}))
+	defer upstream.Close()
+
+	sink := &sliceSink{}
+	proxy := gateway.New(&fakeConfig{
+		token: "client-key",
+		image: []gateway.Target{{ProviderID: "p1", ProviderName: "prov", BaseURL: upstream.URL, APIKey: "upstream-key", Model: "img-edit-x"}},
+	}, sink, nil)
+	proxy.Capture = func() bool { return true }
+
+	imageBytes := []byte("fake-png-bytes")
+	buf, contentType := newEditRequest(t,
+		map[string]string{"model": "alias", "prompt": "add a hat", "size": "1024x1024"},
+		map[string]editFile{"image": {"orig.png", "image/png", imageBytes}},
+	)
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/v1/images/edits", buf)
+	req.Header.Set("Authorization", "Bearer client-key")
+	req.Header.Set("Content-Type", contentType)
+	proxy.ServeHTTP(rec, req)
+	if rec.Code != 200 {
+		t.Fatalf("status = %d, body %s", rec.Code, rec.Body.String())
+	}
+	if seenModel != "img-edit-x" || seenPrompt != "add a hat" || seenSize != "1024x1024" {
+		t.Fatalf("upstream got model %q prompt %q size %q", seenModel, seenPrompt, seenSize)
+	}
+	if seenFilename != "orig.png" || seenContentType != "image/png" || string(seenImage) != string(imageBytes) {
+		t.Fatalf("upstream got file %q %q %q", seenFilename, seenContentType, seenImage)
+	}
+	if !strings.Contains(rec.Body.String(), "ZWRpdGVk") {
+		t.Fatalf("relay missing output payload: %s", rec.Body.String())
+	}
+	if len(sink.records) != 1 {
+		t.Fatalf("expected 1 record, got %d", len(sink.records))
+	}
+	got := sink.records[0]
+	if got.Endpoint != gateway.EndpointImage || got.Outcome != gateway.OutcomeCompleted || got.Status != 200 {
+		t.Fatalf("unexpected record %+v", got)
+	}
+	if got.Transformer != "" {
+		t.Fatalf("transformers do not apply to multipart edits, got %q", got.Transformer)
+	}
+	if got.Usage.Cost == nil || *got.Usage.Cost != 0.02 {
+		t.Fatalf("expected cost 0.02, got %+v", got.Usage)
+	}
+	// One input file plus one output file, in that order.
+	if len(got.Images) != 2 {
+		t.Fatalf("expected input+output files, got %+v", got.Images)
+	}
+	in, out := got.Images[0], got.Images[1]
+	if in.MediaType != "image/png" || !strings.HasSuffix(in.Name, ".png") || string(in.Data) != string(imageBytes) {
+		t.Fatalf("unexpected input file %+v", in)
+	}
+	if out.MediaType != "image/png" || string(out.Data) != "edited" {
+		t.Fatalf("unexpected output file %+v", out)
+	}
+	// Captured request is a summary: fields and filenames, no binary.
+	if got.Bodies == nil {
+		t.Fatal("expected captured bodies")
+	}
+	for _, want := range []string{`"prompt":"add a hat"`, "orig.png"} {
+		if !strings.Contains(got.Bodies.Request, want) {
+			t.Fatalf("captured request missing %s: %s", want, got.Bodies.Request)
+		}
+	}
+	if strings.Contains(got.Bodies.Request, "fake-png-bytes") {
+		t.Fatalf("captured request must not hold binary: %s", got.Bodies.Request)
+	}
+	if strings.Contains(got.Bodies.Response, "ZWRpdGVk") {
+		t.Fatalf("captured response must redact saved output: %s", got.Bodies.Response)
+	}
+}
+
+func TestProxyImageEditsValidation(t *testing.T) {
+	proxy := gateway.New(&fakeConfig{
+		token: "k",
+		image: []gateway.Target{{BaseURL: "http://upstream.test", Model: "img-x"}},
+	}, &sliceSink{}, nil)
+	goodFiles := map[string]editFile{"image": {"a.png", "image/png", []byte("x")}}
+
+	t.Run("not multipart", func(t *testing.T) {
+		rec := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodPost, "/v1/images/edits", strings.NewReader(`{"model":"alias"}`))
+		req.Header.Set("Authorization", "Bearer k")
+		req.Header.Set("Content-Type", "application/json")
+		proxy.ServeHTTP(rec, req)
+		if rec.Code != 400 {
+			t.Fatalf("expected 400, got %d", rec.Code)
+		}
+	})
+	for name, fields := range map[string]map[string]string{
+		"missing model":  {"prompt": "hi"},
+		"missing prompt": {"model": "alias"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			buf, contentType := newEditRequest(t, fields, goodFiles)
+			rec := httptest.NewRecorder()
+			req := httptest.NewRequest(http.MethodPost, "/v1/images/edits", buf)
+			req.Header.Set("Authorization", "Bearer k")
+			req.Header.Set("Content-Type", contentType)
+			proxy.ServeHTTP(rec, req)
+			if rec.Code != 400 {
+				t.Fatalf("expected 400, got %d", rec.Code)
+			}
+		})
+	}
+	t.Run("missing image", func(t *testing.T) {
+		buf, contentType := newEditRequest(t, map[string]string{"model": "alias", "prompt": "hi"}, nil)
+		rec := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodPost, "/v1/images/edits", buf)
+		req.Header.Set("Authorization", "Bearer k")
+		req.Header.Set("Content-Type", contentType)
+		proxy.ServeHTTP(rec, req)
+		if rec.Code != 400 {
+			t.Fatalf("expected 400, got %d", rec.Code)
+		}
+	})
+}
+
+func TestProxyImageEditsAuthAndRouting(t *testing.T) {
+	target := gateway.Target{ProviderID: "p1", ProviderName: "prov", BaseURL: "http://upstream.test", Model: "img-x"}
+	files := map[string]editFile{"image": {"a.png", "image/png", []byte("x")}}
+	post := func(proxy *gateway.Proxy, key string) *httptest.ResponseRecorder {
+		buf, contentType := newEditRequest(t, map[string]string{"model": "alias", "prompt": "hi"}, files)
+		rec := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodPost, "/v1/images/edits", buf)
+		if key != "" {
+			req.Header.Set("Authorization", "Bearer "+key)
+		}
+		req.Header.Set("Content-Type", contentType)
+		proxy.ServeHTTP(rec, req)
+		return rec
+	}
+
+	t.Run("unauthorized", func(t *testing.T) {
+		proxy := gateway.New(&fakeConfig{token: "k", image: []gateway.Target{target}}, &sliceSink{}, nil)
+		if rec := post(proxy, ""); rec.Code != 401 {
+			t.Fatalf("expected 401, got %d", rec.Code)
+		}
+	})
+	t.Run("unknown model", func(t *testing.T) {
+		sink := &sliceSink{}
+		proxy := gateway.New(&fakeConfig{token: "k"}, sink, nil)
+		if rec := post(proxy, "k"); rec.Code != 404 {
+			t.Fatalf("expected 404, got %d", rec.Code)
+		}
+		if len(sink.records) != 0 {
+			t.Fatalf("unknown models are not logged, got %+v", sink.records)
+		}
+	})
+	t.Run("chat-only alias is unknown", func(t *testing.T) {
+		proxy := gateway.New(&fakeConfig{
+			token:   "k",
+			targets: []gateway.Target{{ProviderID: "p1", ProviderName: "prov", BaseURL: "http://x", Model: "gpt-x"}},
+		}, &sliceSink{}, nil)
+		if rec := post(proxy, "k"); rec.Code != 404 {
+			t.Fatalf("expected 404, got %d", rec.Code)
+		}
+	})
+	t.Run("denied key", func(t *testing.T) {
+		sink := &sliceSink{}
+		proxy := gateway.New(&fakeConfig{token: "k", key: policyKey(t, `^other`, "", ""), image: []gateway.Target{target}}, sink, nil)
+		if rec := post(proxy, "k"); rec.Code != 403 {
+			t.Fatalf("expected 403, got %d", rec.Code)
+		}
+		if len(sink.records) != 1 || sink.records[0].Outcome != gateway.OutcomeRejected || sink.records[0].Endpoint != gateway.EndpointImage {
+			t.Fatalf("expected logged rejection, got %+v", sink.records)
+		}
+	})
+}
+
+func TestProxyImageEditsSkipsTransform(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"created":1,"data":[],"usage":{}}`)
+	}))
+	defer upstream.Close()
+
+	sink := &sliceSink{}
+	proxy := gateway.New(&fakeConfig{
+		token: "k",
+		image: []gateway.Target{{ProviderID: "p1", ProviderName: "prov", BaseURL: upstream.URL, Model: "img-x"}},
+		transform: func([]byte) ([]byte, string, error) {
+			return nil, "broken", errors.New("boom")
+		},
+	}, sink, nil)
+
+	buf, contentType := newEditRequest(t,
+		map[string]string{"model": "alias", "prompt": "hi"},
+		map[string]editFile{"image": {"a.png", "image/png", []byte("x")}},
+	)
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/v1/images/edits", buf)
+	req.Header.Set("Authorization", "Bearer k")
+	req.Header.Set("Content-Type", contentType)
+	proxy.ServeHTTP(rec, req)
+	if rec.Code != 200 {
+		t.Fatalf("edits must not fail on JSON transformers, got %d %s", rec.Code, rec.Body.String())
+	}
+	if len(sink.records) != 1 || sink.records[0].Transformer != "" {
+		t.Fatalf("expected empty transformer, got %+v", sink.records)
+	}
+}
+
+func TestProxyImageEditsNoFilesWithoutCapture(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"created":1,"data":[{"b64_json":"aGk=","media_type":"image/png"}],"usage":{}}`)
+	}))
+	defer upstream.Close()
+
+	sink := &sliceSink{}
+	proxy := gateway.New(&fakeConfig{
+		token: "k",
+		image: []gateway.Target{{ProviderID: "p1", ProviderName: "prov", BaseURL: upstream.URL, Model: "img-x"}},
+	}, sink, nil)
+
+	buf, contentType := newEditRequest(t,
+		map[string]string{"model": "alias", "prompt": "hi"},
+		map[string]editFile{"image": {"a.png", "image/png", []byte("x")}},
+	)
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/v1/images/edits", buf)
+	req.Header.Set("Authorization", "Bearer k")
+	req.Header.Set("Content-Type", contentType)
+	proxy.ServeHTTP(rec, req)
+	if rec.Code != 200 {
+		t.Fatalf("status = %d", rec.Code)
+	}
+	got := sink.records[0]
+	if len(got.Images) != 0 || got.Bodies != nil {
+		t.Fatalf("capture off must store neither files nor bodies, got %+v", got)
 	}
 }

@@ -507,6 +507,21 @@
         "required": false,
         "system": false,
         "type": "number"
+      },
+      {
+        "autogeneratePattern": "",
+        "help": "",
+        "hidden": false,
+        "id": "text1002749145",
+        "max": 16,
+        "min": 0,
+        "name": "kind",
+        "pattern": "",
+        "presentable": false,
+        "primaryKey": false,
+        "required": false,
+        "system": false,
+        "type": "text"
       }
     ],
     "id": "pbc_2360150022",

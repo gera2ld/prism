@@ -1310,8 +1310,9 @@ func TestLogCostAndImageFiles(t *testing.T) {
 		StartedAt: testStartedAt,
 		Bodies:    &gateway.Bodies{Request: "req", Response: "resp"},
 		Images: []gateway.GeneratedImage{
-			{Data: []byte("first-bytes"), Name: "pic-0.png", MediaType: "image/png"},
-			{Data: []byte("second-bytes"), Name: "pic-1.jpg", MediaType: "image/jpeg"},
+			{Data: []byte("first-bytes"), Name: "pic-0.png", MediaType: "image/png", Kind: gateway.ImageKindOutput},
+			{Data: []byte("second-bytes"), Name: "pic-1.jpg", MediaType: "image/jpeg", Kind: gateway.ImageKindOutput},
+			{Data: []byte("input-bytes"), Name: "pic-input-image-0.png", MediaType: "image/png", Kind: gateway.ImageKindInput},
 		},
 	}
 	if err := sink.Write(context.Background(), rec); err != nil {
@@ -1333,8 +1334,8 @@ func TestLogCostAndImageFiles(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(images) != 2 {
-		t.Fatalf("expected 2 image rows, got %d", len(images))
+	if len(images) != 3 {
+		t.Fatalf("expected 3 image rows, got %d", len(images))
 	}
 	for i, row := range images {
 		if row.GetString("log") != logs[0].Id {
@@ -1350,6 +1351,13 @@ func TestLogCostAndImageFiles(t *testing.T) {
 		if i == 0 && (!strings.HasSuffix(name, ".png") || row.GetString("media_type") != "image/png") {
 			t.Fatalf("unexpected first image %q media %q", name, row.GetString("media_type"))
 		}
+	}
+	kinds := map[string]int{}
+	for _, row := range images {
+		kinds[row.GetString("kind")]++
+	}
+	if kinds[gateway.ImageKindOutput] != 2 || kinds[gateway.ImageKindInput] != 1 {
+		t.Fatalf("unexpected kinds: %v", kinds)
 	}
 }
 
@@ -1404,5 +1412,48 @@ func TestImageFilesExpireWithRetention(t *testing.T) {
 	}
 	if len(logs) != 1 {
 		t.Fatalf("expected log row kept, got %d", len(logs))
+	}
+}
+
+func TestBackfillImageKinds(t *testing.T) {
+	app := newTestApp(t)
+	s, err := Open(app, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	providerID := seedConfig(t, app, s)
+	secret, err := s.CreateAPIKey(app, "kindfill")
+	if err != nil {
+		t.Fatal(err)
+	}
+	key, err := s.Authenticate(context.Background(), secret)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sink := NewLogSink(app)
+	rec := gateway.Record{
+		KeyID: key.ID, KeyName: "kindfill", Alias: "pic", Endpoint: gateway.EndpointImage,
+		ProviderID: providerID, ProviderName: "prov", UpstreamModel: "img-x",
+		TotalMS: 12, Status: 200, Outcome: gateway.OutcomeCompleted, StartedAt: testStartedAt,
+		Images: []gateway.GeneratedImage{
+			{Data: []byte("x"), Name: "pic-0.png", MediaType: "image/png", Kind: gateway.ImageKindOutput},
+		},
+	}
+	if err := sink.Write(context.Background(), rec); err != nil {
+		t.Fatal(err)
+	}
+	// A row predating the kind column, blanked behind the backfill.
+	if _, err := app.DB().NewQuery("UPDATE {{request_images}} SET [[kind]] = ''").Execute(); err != nil {
+		t.Fatal(err)
+	}
+	if err := backfillImageKinds(app); err != nil {
+		t.Fatal(err)
+	}
+	images, err := app.FindAllRecords("request_images")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(images) != 1 || images[0].GetString("kind") != "output" {
+		t.Fatalf("unexpected kinds: %+v", images)
 	}
 }
