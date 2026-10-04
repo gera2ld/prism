@@ -43,9 +43,33 @@ type Target struct {
 	Model        string
 }
 
+// EndpointType names one gateway surface an alias can serve. Routes carry
+// one, so a chat alias and an image alias never resolve to each other's
+// targets even when they share a name. These are storage values; what
+// clients see in GET /v1/models is ModelsValue.
+type EndpointType string
+
+const (
+	EndpointChat  EndpointType = "chat"
+	EndpointImage EndpointType = "image"
+)
+
+// ModelsValue reports the token advertised in GET /v1/models
+// supported_endpoint_types for this endpoint kind. The vocabulary follows
+// new-api (openai, image-generation, ...) so clients that already speak it
+// can route models without learning Prism-specific names.
+func (e EndpointType) ModelsValue() string {
+	if e == EndpointImage {
+		return "image-generation"
+	}
+	return "openai"
+}
+
 type Config interface {
 	Authenticate(context.Context, string) (Key, error)
-	Resolve(context.Context, string) ([]Target, error)
+	Resolve(ctx context.Context, endpoint EndpointType, alias string) ([]Target, error)
+	// Models lists every alias with at least one enabled route, across all
+	// endpoint types. Callers resolve per endpoint to advertise or authorize.
 	Models(context.Context) ([]string, error)
 	// Transform applies the winning transformer for target, if any.
 	// Returns the (possibly unchanged) body and the applied transformer's
@@ -60,15 +84,19 @@ type Usage struct {
 	// CachedTokens is usage.prompt_tokens_details.cached_tokens, a subset of
 	// PromptTokens. Logged for cost visibility, never double-counted.
 	CachedTokens *int64 `json:"-"`
+	// Cost is usage.cost as reported by image providers (e.g. OpenRouter).
+	// Chat providers do not report it; absent stays nil.
+	Cost *float64 `json:"cost"`
 }
 
 // UnmarshalJSON reads the standard token counts plus the nested OpenAI
 // prompt_tokens_details.cached_tokens field.
 func (u *Usage) UnmarshalJSON(data []byte) error {
 	var raw struct {
-		PromptTokens     *int64 `json:"prompt_tokens"`
-		CompletionTokens *int64 `json:"completion_tokens"`
-		TotalTokens      *int64 `json:"total_tokens"`
+		PromptTokens     *int64   `json:"prompt_tokens"`
+		CompletionTokens *int64   `json:"completion_tokens"`
+		TotalTokens      *int64   `json:"total_tokens"`
+		Cost             *float64 `json:"cost"`
 		Details          *struct {
 			CachedTokens *int64 `json:"cached_tokens"`
 		} `json:"prompt_tokens_details"`
@@ -79,6 +107,7 @@ func (u *Usage) UnmarshalJSON(data []byte) error {
 	u.PromptTokens = raw.PromptTokens
 	u.CompletionTokens = raw.CompletionTokens
 	u.TotalTokens = raw.TotalTokens
+	u.Cost = raw.Cost
 	if raw.Details != nil {
 		u.CachedTokens = raw.Details.CachedTokens
 	}
@@ -91,11 +120,22 @@ type Bodies struct {
 	Truncated bool
 }
 
+// GeneratedImage is one decoded image output awaiting persistence. Data
+// holds the raw bytes, Name is a sanitized filename with an extension
+// derived from the media type, and MediaType is the provider-reported or
+// sniffed MIME type.
+type GeneratedImage struct {
+	Data      []byte
+	Name      string
+	MediaType string
+}
+
 type Record struct {
 	StartedAt     time.Time
 	KeyID         string
 	KeyName       string
 	Alias         string
+	Endpoint      EndpointType
 	ProviderID    string
 	ProviderName  string
 	UpstreamModel string
@@ -109,6 +149,10 @@ type Record struct {
 	Status        int
 	Error         string
 	Bodies        *Bodies
+	// Images carries decoded image outputs for the store to persist as
+	// files. Populated only when body capture is on; url-based outputs are
+	// never downloaded, so only inline base64 items appear here.
+	Images []GeneratedImage
 }
 
 type LogSink interface {

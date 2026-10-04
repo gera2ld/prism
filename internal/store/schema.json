@@ -452,6 +452,99 @@
         "type": "autodate"
       },
       {
+        "cascadeDelete": true,
+        "collectionId": "pbc_3635455392",
+        "help": "",
+        "hidden": false,
+        "id": "relation2403297477",
+        "maxSelect": 0,
+        "minSelect": 0,
+        "name": "log",
+        "presentable": false,
+        "required": true,
+        "system": false,
+        "type": "relation"
+      },
+      {
+        "help": "",
+        "hidden": false,
+        "id": "file3309110367",
+        "maxSelect": 0,
+        "maxSize": 33554432,
+        "mimeTypes": [],
+        "name": "image",
+        "presentable": false,
+        "protected": false,
+        "required": true,
+        "system": false,
+        "thumbs": [],
+        "type": "file"
+      },
+      {
+        "autogeneratePattern": "",
+        "help": "",
+        "hidden": false,
+        "id": "text1335462138",
+        "max": 128,
+        "min": 0,
+        "name": "media_type",
+        "pattern": "",
+        "presentable": false,
+        "primaryKey": false,
+        "required": false,
+        "system": false,
+        "type": "text"
+      },
+      {
+        "help": "",
+        "hidden": false,
+        "id": "number1177347317",
+        "max": null,
+        "min": null,
+        "name": "position",
+        "onlyInt": true,
+        "presentable": false,
+        "required": false,
+        "system": false,
+        "type": "number"
+      }
+    ],
+    "id": "pbc_2360150022",
+    "indexes": [
+      "CREATE INDEX `idx_request_images_log` ON `request_images` (log)",
+      "CREATE INDEX `idx_request_images_created` ON `request_images` (created)"
+    ],
+    "name": "request_images",
+    "type": "base"
+  },
+  {
+    "fields": [
+      {
+        "autogeneratePattern": "[a-z0-9]{15}",
+        "help": "",
+        "hidden": false,
+        "id": "text3208210256",
+        "max": 15,
+        "min": 15,
+        "name": "id",
+        "pattern": "^[a-z0-9]+$",
+        "presentable": false,
+        "primaryKey": true,
+        "required": true,
+        "system": true,
+        "type": "text"
+      },
+      {
+        "hidden": false,
+        "id": "autodate2990389176",
+        "name": "created",
+        "onCreate": true,
+        "onUpdate": false,
+        "presentable": false,
+        "system": false,
+        "type": "autodate"
+      },
+      {
         "help": "",
         "hidden": false,
         "id": "date222754019",
@@ -701,6 +794,34 @@
         "required": false,
         "system": false,
         "type": "text"
+      },
+      {
+        "autogeneratePattern": "",
+        "help": "",
+        "hidden": false,
+        "id": "text3675434334",
+        "max": 32,
+        "min": 0,
+        "name": "endpoint_type",
+        "pattern": "",
+        "presentable": false,
+        "primaryKey": false,
+        "required": false,
+        "system": false,
+        "type": "text"
+      },
+      {
+        "help": "",
+        "hidden": false,
+        "id": "number405181692",
+        "max": null,
+        "min": null,
+        "name": "cost",
+        "onlyInt": false,
+        "presentable": false,
+        "required": false,
+        "system": false,
+        "type": "number"
       }
     ],
     "id": "pbc_3635455392",
@@ -813,6 +934,21 @@
         "required": false,
         "system": false,
         "type": "bool"
+      },
+      {
+        "autogeneratePattern": "",
+        "help": "",
+        "hidden": false,
+        "id": "text3675434334",
+        "max": 32,
+        "min": 0,
+        "name": "endpoint_type",
+        "pattern": "",
+        "presentable": false,
+        "primaryKey": false,
+        "required": false,
+        "system": false,
+        "type": "text"
       }
     ],
     "id": "pbc_96911357",
@@ -826,7 +962,7 @@
     "id": "pbc_2198965770",
     "name": "routes_usage",
     "type": "view",
-    "viewQuery": "SELECT r.id AS id, r.alias AS alias, r.provider AS provider, r.upstream_model AS upstream_model, MAX(COALESCE(NULLIF(l.started_at, ''), l.created)) AS last_used, COUNT(CASE WHEN l.outcome = 'completed' THEN 1 END) AS success_requests, COUNT(CASE WHEN l.outcome \u003c\u003e 'completed' THEN 1 END) AS fail_requests FROM routes AS r LEFT JOIN request_logs AS l ON l.alias = r.alias AND l.provider = r.provider AND l.upstream_model = r.upstream_model GROUP BY r.id, r.alias, r.provider, r.upstream_model"
+    "viewQuery": "SELECT r.id AS id, r.alias AS alias, r.endpoint_type AS endpoint_type, r.provider AS provider, r.upstream_model AS upstream_model, MAX(COALESCE(NULLIF(l.started_at, ''), l.created)) AS last_used, COUNT(CASE WHEN l.outcome = 'completed' THEN 1 END) AS success_requests, COUNT(CASE WHEN l.outcome \u003c\u003e 'completed' THEN 1 END) AS fail_requests FROM routes AS r LEFT JOIN request_logs AS l ON l.alias = r.alias AND l.endpoint_type = r.endpoint_type AND l.provider = r.provider AND l.upstream_model = r.upstream_model GROUP BY r.id, r.alias, r.endpoint_type, r.provider, r.upstream_model"
   },
   {
     "fields": [

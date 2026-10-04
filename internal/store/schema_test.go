@@ -27,7 +27,7 @@ func TestProjectHasNoMigrations(t *testing.T) {
 // Hardcoded so dropping a collection from schema.json fails the test.
 var declaredCollections = []string{
 	"api_keys", "gateway_settings", "providers", "request_bodies", "request_logs",
-	"routes", "tool_logs", "tools", "transformers", "users",
+	"request_images", "routes", "tool_logs", "tools", "transformers", "users",
 	"api_keys_usage", "providers_usage", "routes_usage", "tools_usage",
 }
 

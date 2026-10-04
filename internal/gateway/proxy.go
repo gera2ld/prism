@@ -49,6 +49,10 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		p.handleModels(w, r)
 	case r.URL.Path == chatPath && r.Method == http.MethodPost:
 		p.handleChat(w, r)
+	case r.URL.Path == imagesPath && r.Method == http.MethodPost:
+		p.handleImages(w, r)
+	case r.URL.Path == generationsPath && r.Method == http.MethodPost:
+		p.handleImageGenerations(w, r)
 	case r.URL.Path == toolsPath && r.Method == http.MethodGet:
 		p.handleTools(w, r)
 	case p.serveToolInvoke(w, r):
@@ -68,20 +72,35 @@ func (p *Proxy) handleModels(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "config_error", "failed to load routes")
 		return
 	}
-	// Clients enumerate only the aliases their key may use.
+	// Clients enumerate only the aliases their key may use. An alias is
+	// listed when the key may use it on at least one endpoint, and the
+	// endpoint list names exactly the kinds that passed authorization, so
+	// a chat-only alias never advertises image capability. The tokens are
+	// new-api's (openai, image-generation, ...), not the storage values.
 	data := make([]modelObject, 0, len(names))
 	for _, name := range names {
-		targets, err := p.Config.Resolve(r.Context(), name)
-		if err != nil {
+		var endpointTypes []string
+		owner := ""
+		for _, endpoint := range []EndpointType{EndpointChat, EndpointImage} {
+			targets, err := p.Config.Resolve(r.Context(), endpoint, name)
+			if err != nil {
+				continue
+			}
+			// One entry per alias: the winning target, so multi-provider aliases
+			// list the provider that would actually serve the request.
+			target, err := Authorize(presented, name, targets)
+			if err != nil {
+				continue
+			}
+			if owner == "" {
+				owner = target.ProviderName
+			}
+			endpointTypes = append(endpointTypes, endpoint.ModelsValue())
+		}
+		if len(endpointTypes) == 0 {
 			continue
 		}
-		// One entry per alias: the winning target, so multi-provider aliases
-		// list the provider that would actually serve the request.
-		target, err := Authorize(presented, name, targets)
-		if err != nil {
-			continue
-		}
-		data = append(data, modelObject{Object: "model", ID: name, OwnedBy: target.ProviderName, SupportedEndpointTypes: []string{"openai"}})
+		data = append(data, modelObject{Object: "model", ID: name, OwnedBy: owner, SupportedEndpointTypes: endpointTypes})
 	}
 	writeJSON(w, http.StatusOK, modelsResponse{Object: "list", Data: data})
 }
@@ -89,9 +108,9 @@ func (p *Proxy) handleModels(w http.ResponseWriter, r *http.Request) {
 // deny rejects a request no route target of which the key may use. The denial
 // is logged with the top route's provider/model so the operator can see
 // exactly what was blocked.
-func (p *Proxy) deny(w http.ResponseWriter, start time.Time, presented Key, alias string, raw []byte, blocked Target) {
+func (p *Proxy) deny(w http.ResponseWriter, start time.Time, presented Key, endpoint EndpointType, alias string, raw []byte, blocked Target) {
 	rec := Record{
-		StartedAt: start, KeyID: presented.ID, KeyName: presented.Name, Alias: alias,
+		StartedAt: start, KeyID: presented.ID, KeyName: presented.Name, Alias: alias, Endpoint: endpoint,
 		ProviderID: blocked.ProviderID, ProviderName: blocked.ProviderName, UpstreamModel: blocked.Model,
 		TotalMS: p.Now().Sub(start).Milliseconds(), Status: http.StatusForbidden,
 		Outcome: OutcomeRejected,
@@ -181,7 +200,7 @@ func (p *Proxy) handleChat(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	targets, err := p.Config.Resolve(r.Context(), req.Model)
+	targets, err := p.Config.Resolve(r.Context(), EndpointChat, req.Model)
 	if err != nil {
 		if errors.Is(err, ErrUnauthorized) {
 			writeError(w, http.StatusUnauthorized, "invalid_api_key", "Invalid API key")
@@ -195,7 +214,7 @@ func (p *Proxy) handleChat(w http.ResponseWriter, r *http.Request) {
 	// it is allowed to use.
 	target, err := Authorize(presented, req.Model, targets)
 	if err != nil {
-		p.deny(w, start, presented, req.Model, raw, targets[0])
+		p.deny(w, start, presented, EndpointChat, req.Model, raw, targets[0])
 		return
 	}
 	alias := req.Model
@@ -217,7 +236,7 @@ func (p *Proxy) handleChat(w http.ResponseWriter, r *http.Request) {
 			status = 0
 		}
 		rec := Record{
-			StartedAt: start, KeyID: presented.ID, KeyName: presented.Name, Alias: alias,
+			StartedAt: start, KeyID: presented.ID, KeyName: presented.Name, Alias: alias, Endpoint: EndpointChat,
 			ProviderID: target.ProviderID, ProviderName: target.ProviderName, UpstreamModel: target.Model, Transformer: transformer, Stream: stream,
 			TotalMS: p.Now().Sub(start).Milliseconds(), Status: status,
 			Outcome: outcome,
@@ -231,7 +250,7 @@ func (p *Proxy) handleChat(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	rec := Record{
-		StartedAt: start, KeyID: presented.ID, KeyName: presented.Name, Alias: alias,
+		StartedAt: start, KeyID: presented.ID, KeyName: presented.Name, Alias: alias, Endpoint: EndpointChat,
 		ProviderID: target.ProviderID, ProviderName: target.ProviderName, UpstreamModel: target.Model, Transformer: transformer, Stream: stream,
 	}
 

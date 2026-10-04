@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
+	"fmt"
 	"log/slog"
 	"os"
 	"slices"
@@ -165,6 +166,20 @@ func Open(app core.App, logger *slog.Logger) (*Store, error) {
 	app.OnRecordCreate("api_keys").Bind(validateKeyPolicy)
 	app.OnRecordUpdate("api_keys").Bind(validateKeyPolicy)
 
+	// routes: an empty endpoint_type defaults to chat; anything outside the
+	// gateway's known endpoint kinds is rejected, so a typo can never
+	// persist as an unreachable route.
+	normalizeRoute := &hook.Handler[*core.RecordEvent]{
+		Func: func(e *core.RecordEvent) error {
+			if err := normalizeRouteEndpoint(e.Record); err != nil {
+				return err
+			}
+			return e.Next()
+		},
+	}
+	app.OnRecordCreate("routes").Bind(normalizeRoute)
+	app.OnRecordUpdate("routes").Bind(normalizeRoute)
+
 	// api_keys edits must drop cached authentications immediately, or a
 	// disabled key (or tightened policy) would keep working from cache.
 	invalidateKeys := &hook.Handler[*core.RecordEvent]{
@@ -179,6 +194,12 @@ func Open(app core.App, logger *slog.Logger) (*Store, error) {
 
 	// The embedded snapshot is the schema, applied on every open.
 	if err := ApplySchema(app); err != nil {
+		return nil, err
+	}
+
+	// Rows written before endpoint_type existed read back empty. Fill them
+	// as chat so routing and the usage views see the kind they always were.
+	if err := backfillRouteEndpoints(app); err != nil {
 		return nil, err
 	}
 
@@ -378,21 +399,27 @@ func (s *Store) Authenticate(ctx context.Context, presented string) (gateway.Key
 	return key, nil
 }
 
-// Resolve maps an alias to its priority-ordered targets. Every model must
-// go through the routing table; unknown aliases are an error, no exceptions.
-func (s *Store) Resolve(ctx context.Context, alias string) ([]gateway.Target, error) {
+// Resolve maps an alias to its priority-ordered targets for one endpoint
+// kind. Every model must go through the routing table; unknown aliases, and
+// aliases with no route of the requested kind, are an error, no exceptions.
+func (s *Store) Resolve(ctx context.Context, endpoint gateway.EndpointType, alias string) ([]gateway.Target, error) {
+	if endpoint != gateway.EndpointChat && endpoint != gateway.EndpointImage {
+		return nil, gateway.ErrUnknownModel
+	}
 	if err := s.loadRoutes(); err != nil {
 		return nil, err
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	targets := s.targets[alias]
+	targets := s.targets[string(endpoint)+"\x00"+alias]
 	if len(targets) == 0 {
 		return nil, gateway.ErrUnknownModel
 	}
 	return slices.Clone(targets), nil
 }
 
+// Models lists every alias with at least one enabled route, across all
+// endpoint kinds. Callers resolve per endpoint to advertise or authorize.
 func (s *Store) Models(ctx context.Context) ([]string, error) {
 	if err := s.loadRoutes(); err != nil {
 		return nil, err
@@ -547,30 +574,68 @@ func (s *Store) loadRoutes() error {
 		return cmp.Compare(a.GetFloat("priority"), b.GetFloat("priority"))
 	})
 	targets := make(map[string][]gateway.Target, len(routes))
+	seen := make(map[string]bool, len(routes))
+	aliases := make([]string, 0, len(routes))
 	for _, r := range routes {
 		p, ok := byID[r.GetString("provider")]
 		if !ok {
 			continue
 		}
 		alias := r.GetString("alias")
-		targets[alias] = append(targets[alias], gateway.Target{
+		endpoint := r.GetString("endpoint_type")
+		if endpoint == "" {
+			// Rows predating the column (or the backfill) are chat routes.
+			endpoint = string(gateway.EndpointChat)
+		}
+		key := endpoint + "\x00" + alias
+		targets[key] = append(targets[key], gateway.Target{
 			ProviderID:   r.GetString("provider"),
 			ProviderName: p.name,
 			BaseURL:      p.baseURL,
 			APIKey:       p.apiKey,
 			Model:        r.GetString("upstream_model"),
 		})
+		if !seen[alias] {
+			seen[alias] = true
+			aliases = append(aliases, alias)
+		}
 	}
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.targets = targets
-	aliases := make([]string, 0, len(targets))
-	for alias := range targets {
-		aliases = append(aliases, alias)
-	}
 	sort.Strings(aliases)
 	s.models = aliases
 	s.keys = map[string]gateway.Key{}
 	return nil
+}
+
+// normalizeRouteEndpoint defaults an empty endpoint_type to chat and rejects
+// unknown kinds at save time.
+func normalizeRouteEndpoint(record *core.Record) error {
+	switch record.GetString("endpoint_type") {
+	case "", string(gateway.EndpointChat):
+		record.Set("endpoint_type", string(gateway.EndpointChat))
+	case string(gateway.EndpointImage):
+	default:
+		return fmt.Errorf("unknown endpoint_type %q: want chat or image", record.GetString("endpoint_type"))
+	}
+	return nil
+}
+
+// backfillRouteEndpoints fills endpoint_type on rows written before the
+// column existed. The snapshot adds the column on open, but existing rows
+// read back empty.
+func backfillRouteEndpoints(app core.App) error {
+	collection, err := app.FindCollectionByNameOrId("routes")
+	if err != nil {
+		return err
+	}
+	if collection.Fields.GetByName("endpoint_type") == nil {
+		return nil
+	}
+	_, err = app.DB().NewQuery(
+		"UPDATE {{routes}} SET [[endpoint_type]] = 'chat' WHERE [[endpoint_type]] IS NULL OR [[endpoint_type]] = ''",
+	).Execute()
+	return err
 }

@@ -11,14 +11,21 @@ import (
 	"strings"
 
 	"github.com/pocketbase/pocketbase/core"
+
+	"github.com/gera2ld/prism/internal/gateway"
 )
 
-var routeCSVHeader = []string{"alias", "provider", "upstream_model", "priority", "enabled"}
+var routeCSVHeader = []string{"alias", "provider", "upstream_model", "endpoint_type", "priority", "enabled"}
+
+// routeCSVLegacyHeader is the pre-image-support shape. Imports in this shape
+// still work; every row resolves as a chat route.
+var routeCSVLegacyHeader = []string{"alias", "provider", "upstream_model", "priority", "enabled"}
 
 type routeCSVRow struct {
 	Alias         string
 	Provider      string
 	UpstreamModel string
+	EndpointType  string
 	Priority      int
 	Enabled       bool
 }
@@ -55,11 +62,15 @@ func (s *Store) ExportRoutesCSV() ([]byte, error) {
 		rows = append(rows, routeCSVRow{
 			Alias: route.GetString("alias"), Provider: provider,
 			UpstreamModel: route.GetString("upstream_model"),
+			EndpointType:  routeEndpoint(route),
 			Priority:      route.GetInt("priority"), Enabled: route.GetBool("enabled"),
 		})
 	}
 	slices.SortFunc(rows, func(a, b routeCSVRow) int {
 		if n := strings.Compare(a.Alias, b.Alias); n != 0 {
+			return n
+		}
+		if n := strings.Compare(a.EndpointType, b.EndpointType); n != 0 {
 			return n
 		}
 		if n := strings.Compare(a.Provider, b.Provider); n != 0 {
@@ -107,8 +118,20 @@ func (s *Store) ImportRoutesReader(r io.Reader, prune bool) error {
 	if err != nil {
 		return fmt.Errorf("read CSV header: %w", err)
 	}
-	if !slices.Equal(header, routeCSVHeader) {
+	legacy := slices.Equal(header, routeCSVLegacyHeader)
+	if !legacy && !slices.Equal(header, routeCSVHeader) {
 		return fmt.Errorf("invalid CSV header: got %v, want %v", header, routeCSVHeader)
+	}
+	// Column positions shift with the shape: endpoint_type sits between
+	// upstream_model and priority in the current header and is absent in
+	// the legacy one (where every row is a chat route).
+	endpointCol := 3
+	priorityCol := 4
+	enabledCol := 5
+	if legacy {
+		endpointCol = -1
+		priorityCol = 3
+		enabledCol = 4
 	}
 	providers, err := s.app.FindAllRecords("providers")
 	if err != nil {
@@ -128,14 +151,24 @@ func (s *Store) ImportRoutesReader(r io.Reader, prune bool) error {
 		if readErr != nil {
 			return fmt.Errorf("read CSV line %d: %w", line, readErr)
 		}
-		if len(record) != len(routeCSVHeader) {
-			return fmt.Errorf("CSV line %d: expected %d fields", line, len(routeCSVHeader))
+		if len(record) != len(header) {
+			return fmt.Errorf("CSV line %d: expected %d fields", line, len(header))
 		}
-		priority, parseErr := strconv.Atoi(record[3])
+		endpoint := string(gateway.EndpointChat)
+		if endpointCol >= 0 {
+			endpoint = strings.TrimSpace(record[endpointCol])
+			if endpoint == "" {
+				endpoint = string(gateway.EndpointChat)
+			}
+			if endpoint != string(gateway.EndpointChat) && endpoint != string(gateway.EndpointImage) {
+				return fmt.Errorf("CSV line %d has unknown endpoint_type %q: want chat or image", line, record[endpointCol])
+			}
+		}
+		priority, parseErr := strconv.Atoi(record[priorityCol])
 		if parseErr != nil {
 			return fmt.Errorf("CSV line %d priority: %w", line, parseErr)
 		}
-		enabled, parseErr := strconv.ParseBool(record[4])
+		enabled, parseErr := strconv.ParseBool(record[enabledCol])
 		if parseErr != nil {
 			return fmt.Errorf("CSV line %d enabled: %w", line, parseErr)
 		}
@@ -146,12 +179,12 @@ func (s *Store) ImportRoutesReader(r io.Reader, prune bool) error {
 		if !ok {
 			return fmt.Errorf("CSV line %d references unknown provider %q", line, record[1])
 		}
-		key := record[0] + "\x00" + providerID + "\x00" + record[2]
+		key := record[0] + "\x00" + endpoint + "\x00" + providerID + "\x00" + record[2]
 		if seen[key] {
 			return fmt.Errorf("CSV line %d duplicates an earlier route", line)
 		}
 		seen[key] = true
-		rows = append(rows, routeCSVRow{Alias: record[0], Provider: providerID, UpstreamModel: record[2], Priority: priority, Enabled: enabled})
+		rows = append(rows, routeCSVRow{Alias: record[0], Provider: providerID, UpstreamModel: record[2], EndpointType: endpoint, Priority: priority, Enabled: enabled})
 	}
 
 	routes, err := s.app.FindAllRecords("routes")
@@ -160,7 +193,7 @@ func (s *Store) ImportRoutesReader(r io.Reader, prune bool) error {
 	}
 	existing := make(map[string]*core.Record, len(routes))
 	for _, route := range routes {
-		key := route.GetString("alias") + "\x00" + route.GetString("provider") + "\x00" + route.GetString("upstream_model")
+		key := route.GetString("alias") + "\x00" + routeEndpoint(route) + "\x00" + route.GetString("provider") + "\x00" + route.GetString("upstream_model")
 		existing[key] = route
 	}
 	collection, err := s.app.FindCollectionByNameOrId("routes")
@@ -168,12 +201,13 @@ func (s *Store) ImportRoutesReader(r io.Reader, prune bool) error {
 		return err
 	}
 	for _, row := range rows {
-		key := row.Alias + "\x00" + row.Provider + "\x00" + row.UpstreamModel
+		key := row.Alias + "\x00" + row.EndpointType + "\x00" + row.Provider + "\x00" + row.UpstreamModel
 		route := existing[key]
 		if route == nil {
 			route = core.NewRecord(collection)
 		}
 		route.Set("alias", row.Alias)
+		route.Set("endpoint_type", row.EndpointType)
 		route.Set("provider", row.Provider)
 		route.Set("upstream_model", row.UpstreamModel)
 		route.Set("priority", row.Priority)
@@ -200,5 +234,14 @@ func (s *Store) ImportRoutesReader(r io.Reader, prune bool) error {
 }
 
 func routeCSVRecord(row routeCSVRow) []string {
-	return []string{row.Alias, row.Provider, row.UpstreamModel, strconv.Itoa(row.Priority), strconv.FormatBool(row.Enabled)}
+	return []string{row.Alias, row.Provider, row.UpstreamModel, row.EndpointType, strconv.Itoa(row.Priority), strconv.FormatBool(row.Enabled)}
+}
+
+// routeEndpoint reads a route's endpoint kind, defaulting rows that predate
+// the column to chat.
+func routeEndpoint(route *core.Record) string {
+	if endpoint := route.GetString("endpoint_type"); endpoint != "" {
+		return endpoint
+	}
+	return string(gateway.EndpointChat)
 }

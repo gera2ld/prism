@@ -21,7 +21,7 @@ log store, while the proxy itself is plain `net/http`.
 
 ## Non-goals
 
-- **Not the Responses API.** Stateful endpoints are out of scope. Chat Completions only.
+- **Not the Responses API.** Stateful endpoints are out of scope. Chat Completions plus image generation only.
 - **Not the agent loop.** Prism lists the tools a client may call and executes one on request; it
   does not decide to call them. The agent drives its own loop, which keeps the gateway a
   pass-through for chat and keeps this feature from becoming an agent runtime.
@@ -36,10 +36,10 @@ log store, while the proxy itself is plain `net/http`.
 
 ## Data model
 
-Fourteen collections, declared in `internal/store/schema.json` and embedded in the binary:
+Fifteen collections, declared in `internal/store/schema.json` and embedded in the binary:
 nine are configuration and stores, four are read-only usage views.
 The first two are configuration I edit by hand; `routes` and `transformers` shape requests;
-`request_logs` and `request_bodies` are chat history; the rest belong to the tools surface.
+`request_logs`, `request_bodies` and `request_images` are request history; the rest belong to the tools surface.
 
 ### Schema ownership
 
@@ -92,11 +92,12 @@ An upstream that speaks OpenAI-compatible HTTP.
 
 ### `routes`
 
-Maps an alias to a concrete model on a concrete provider. This is the whole routing table.
+Maps an alias to a concrete model on a concrete provider, for one endpoint kind. This is the whole routing table.
 
 | Field | Notes |
 | --- | --- |
 | `alias` | What clients send in `model` |
+| `endpoint_type` | `chat` or `image`; a chat alias and an image alias never share targets even when named alike |
 | `provider` | Relation to `providers` |
 | `upstream_model` | The name the provider actually expects |
 | `priority` | Lower wins; ties broken arbitrarily |
@@ -110,11 +111,11 @@ it is not a conflict, it is a fallback chain.
 One row per request, written after the response completes or fails.
 
 Identity and routing: `api_key` (relation), `api_key_name` (API-key name snapshot), `alias`,
-`provider` (relation), `provider_name` (provider-name snapshot), `upstream_model`, `transformer`
-(name of the transformer that shaped
+`endpoint_type` (`chat` or `image`), `provider` (relation), `provider_name` (provider-name snapshot),
+`upstream_model`, `transformer` (name of the transformer that shaped
 the request, empty when none), `stream`. Request history is disposable pre-release data.
 Usage: `prompt_tokens`, `completion_tokens`, `total_tokens`, `cached_tokens` (prompt-cache
-hits, a subset of `prompt_tokens`) — all nullable.
+hits, a subset of `prompt_tokens`), `cost` (provider-reported price, image requests) — all nullable.
 Timing: `started_at` (gateway-side request start, UTC; NULL on rows logged before the field
 existed), `ttft_ms` (streaming only), `total_ms`. `created` is the row-write time, i.e. request end.
 Outcome: `status`, `outcome`, `error`, and `finish_reason`. `outcome` is one of `completed`,
@@ -128,6 +129,18 @@ only after its `[DONE]` event is successfully relayed.
 Optional debugging payload, one row per logged request, deleted on a schedule.
 
 `log` (relation), `request`, `response`, `truncated`.
+
+### `request_images`
+
+Generated image outputs, one row per image in response order, written only when
+body capture is on and expired by the same retention schedule.
+
+`log` (relation), `image` (file), `media_type`, `position`. Inline base64
+payloads are decoded into `image` files instead of living as text: the
+captured `request_bodies.response` keeps the structure with saved payloads
+blanked. URL outputs are never downloaded, only base64 ones are stored.
+Deletion goes through the record API rather than raw SQL, so the files leave
+the disk together with their rows.
 
 ### `api_keys`
 
@@ -301,6 +314,8 @@ and a log sink, which is why it can be tested against in-process transports with
 ## Surface
 
 - `POST /v1/chat/completions` — streaming and non-streaming.
+- `POST /v1/images/generations` — image generation in OpenAI's shape, non-streaming.
+- `POST /v1/images` — image generation in OpenRouter's shape, non-streaming; kept for OpenRouter-backed providers.
 - `GET /v1/models` — the enabled aliases, in OpenAI's shape.
 - `GET /v1/tools` — the tools this key may call, in OpenAI's tool shape so an agent can hand the
   array straight to a chat request.

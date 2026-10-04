@@ -21,6 +21,7 @@ func gatewayRecord(keyID, providerID string, total *int64) gateway.Record {
 		KeyID:         keyID,
 		KeyName:       "smoke",
 		Alias:         "alias",
+		Endpoint:      gateway.EndpointChat,
 		ProviderID:    providerID,
 		ProviderName:  "prov",
 		UpstreamModel: "gpt-x",
@@ -136,7 +137,7 @@ func TestStoreEndToEnd(t *testing.T) {
 	}
 
 	// resolve alias
-	targets, err := s.Resolve(context.Background(), "alias")
+	targets, err := s.Resolve(context.Background(), gateway.EndpointChat, "alias")
 	if err != nil {
 		t.Fatalf("resolve: %v", err)
 	}
@@ -150,7 +151,7 @@ func TestStoreEndToEnd(t *testing.T) {
 	// Strict routing: no provider/model escape hatch. Anything unaliased,
 	// slashes included, is an unknown model.
 	for _, unaliased := range []string{"openai/anything", "prov/any-model", "qwen/qwen3:free"} {
-		if _, err := s.Resolve(context.Background(), unaliased); err == nil {
+		if _, err := s.Resolve(context.Background(), gateway.EndpointChat, unaliased); err == nil {
 			t.Fatalf("expected unknown model error for %q", unaliased)
 		}
 	}
@@ -166,7 +167,7 @@ func TestStoreEndToEnd(t *testing.T) {
 	if err := app.Save(slash); err != nil {
 		t.Fatalf("slash alias rejected: %v", err)
 	}
-	slashed, err := s.Resolve(context.Background(), "qwen/qwen3:free")
+	slashed, err := s.Resolve(context.Background(), gateway.EndpointChat, "qwen/qwen3:free")
 	if err != nil {
 		t.Fatalf("slash alias: %v", err)
 	}
@@ -193,7 +194,7 @@ func TestStoreEndToEnd(t *testing.T) {
 	if err := app.Save(second); err != nil {
 		t.Fatal(err)
 	}
-	chain, err := s.Resolve(context.Background(), "alias")
+	chain, err := s.Resolve(context.Background(), gateway.EndpointChat, "alias")
 	if err != nil {
 		t.Fatalf("chain resolve: %v", err)
 	}
@@ -221,12 +222,12 @@ func TestStoreEndToEnd(t *testing.T) {
 	if err := app.Save(r2); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.Resolve(context.Background(), "second"); err != nil {
+	if _, err := s.Resolve(context.Background(), gateway.EndpointChat, "second"); err != nil {
 		t.Fatalf("expected cache invalidation to pick up new route: %v", err)
 	}
 
 	// unknown alias
-	if _, err := s.Resolve(context.Background(), "nope"); err == nil {
+	if _, err := s.Resolve(context.Background(), gateway.EndpointChat, "nope"); err == nil {
 		t.Fatal("expected unknown model error")
 	}
 
@@ -363,7 +364,7 @@ func TestUsageViewsSplitOutcomes(t *testing.T) {
 	}
 
 	base := gateway.Record{
-		KeyID: key.ID, KeyName: "split", Alias: "alias",
+		KeyID: key.ID, KeyName: "split", Alias: "alias", Endpoint: gateway.EndpointChat,
 		ProviderID: providerID, ProviderName: "prov", UpstreamModel: "gpt-x",
 	}
 	outcomes := []gateway.Outcome{
@@ -882,11 +883,11 @@ func TestRoutesCSVImportExport(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(string(data), "alias,prov,gpt-x,0,true") {
+	if !strings.Contains(string(data), "alias,prov,gpt-x,chat,0,true") {
 		t.Fatalf("unexpected export: %s", data)
 	}
 
-	if err := os.WriteFile(file, []byte("alias,provider,upstream_model,priority,enabled\nqwen/qwen3:free,prov,qwen-30b,5,false\nalias,prov,gpt-x,7,false\n"), 0600); err != nil {
+	if err := os.WriteFile(file, []byte("alias,provider,upstream_model,endpoint_type,priority,enabled\nqwen/qwen3:free,prov,qwen-30b,chat,5,false\nalias,prov,gpt-x,chat,7,false\n"), 0600); err != nil {
 		t.Fatal(err)
 	}
 	if err := s.ImportRoutes(file, false); err != nil {
@@ -1110,5 +1111,298 @@ func TestKeyPolicyEndToEnd(t *testing.T) {
 	}
 	if key.Allows("qwen/qwen3:free", allowTarget) {
 		t.Fatal("tightened policy must deny")
+	}
+}
+
+func seedRoute(t *testing.T, app *core.BaseApp, alias, providerID, upstream, endpoint string) {
+	t.Helper()
+	collection, err := app.FindCollectionByNameOrId("routes")
+	if err != nil {
+		t.Fatal(err)
+	}
+	r := core.NewRecord(collection)
+	r.Set("alias", alias)
+	r.Set("provider", providerID)
+	r.Set("upstream_model", upstream)
+	if endpoint != "" {
+		r.Set("endpoint_type", endpoint)
+	}
+	r.Set("priority", 0)
+	r.Set("enabled", true)
+	if err := app.Save(r); err != nil {
+		t.Fatalf("save route %s/%s: %v", alias, endpoint, err)
+	}
+}
+
+func TestRouteEndpointsIsolateChatAndImage(t *testing.T) {
+	app := newTestApp(t)
+	s, err := Open(app, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	providerID := seedConfig(t, app, s)
+	seedRoute(t, app, "alias", providerID, "img-x", "image")
+	seedRoute(t, app, "pic", providerID, "img-y", "image")
+
+	chat, err := s.Resolve(context.Background(), gateway.EndpointChat, "alias")
+	if err != nil || len(chat) != 1 || chat[0].Model != "gpt-x" {
+		t.Fatalf("chat targets = %+v, err = %v", chat, err)
+	}
+	img, err := s.Resolve(context.Background(), gateway.EndpointImage, "alias")
+	if err != nil || len(img) != 1 || img[0].Model != "img-x" {
+		t.Fatalf("image targets = %+v, err = %v", img, err)
+	}
+	// Same alias serves both kinds, listed once in the union.
+	names, err := s.Models(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(names) != 2 || names[0] != "alias" || names[1] != "pic" {
+		t.Fatalf("unexpected models: %v", names)
+	}
+	// A chat-only alias is unknown to images and vice versa.
+	if _, err := s.Resolve(context.Background(), gateway.EndpointImage, "pic-alias-missing"); err == nil {
+		t.Fatal("expected unknown model for missing image alias")
+	}
+	if _, err := s.Resolve(context.Background(), gateway.EndpointChat, "pic"); err == nil {
+		t.Fatal("expected unknown model resolving an image-only alias as chat")
+	}
+	if _, err := s.Resolve(context.Background(), "video", "alias"); err == nil {
+		t.Fatal("expected unknown model for an unknown endpoint kind")
+	}
+}
+
+func TestRouteEndpointDefaultsAndValidation(t *testing.T) {
+	app := newTestApp(t)
+	s, err := Open(app, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	providerID := seedConfig(t, app, s)
+
+	// Empty defaults to chat via the save hook.
+	seedRoute(t, app, "plain", providerID, "m", "")
+	plain, err := app.FindFirstRecordByFilter("routes", "alias = 'plain'")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := plain.GetString("endpoint_type"); got != "chat" {
+		t.Fatalf("endpoint_type = %q, want chat", got)
+	}
+
+	// Unknown kinds are rejected at save time.
+	collection, err := app.FindCollectionByNameOrId("routes")
+	if err != nil {
+		t.Fatal(err)
+	}
+	bad := core.NewRecord(collection)
+	bad.Set("alias", "bad")
+	bad.Set("provider", providerID)
+	bad.Set("upstream_model", "m")
+	bad.Set("endpoint_type", "video")
+	bad.Set("enabled", true)
+	if err := app.Save(bad); err == nil {
+		t.Fatal("expected save-time rejection of unknown endpoint_type")
+	}
+}
+
+func TestRoutesCSVLegacyImportDefaultsChat(t *testing.T) {
+	app := newTestApp(t)
+	s, err := Open(app, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	seedConfig(t, app, s)
+
+	legacy := "alias,provider,upstream_model,priority,enabled\nlegacy,prov,legacy-model,0,true\n"
+	if err := s.ImportRoutesReader(strings.NewReader(legacy), false); err != nil {
+		t.Fatalf("legacy import: %v", err)
+	}
+	chat, err := s.Resolve(context.Background(), gateway.EndpointChat, "legacy")
+	if err != nil || len(chat) != 1 || chat[0].Model != "legacy-model" {
+		t.Fatalf("chat targets = %+v, err = %v", chat, err)
+	}
+	if _, err := s.Resolve(context.Background(), gateway.EndpointImage, "legacy"); err == nil {
+		t.Fatal("legacy rows must not resolve as image routes")
+	}
+
+	bad := "alias,provider,upstream_model,endpoint_type,priority,enabled\nbad,prov,m,video,0,true\n"
+	if err := s.ImportRoutesReader(strings.NewReader(bad), false); err == nil {
+		t.Fatal("expected rejection of unknown endpoint_type")
+	}
+	if _, err := app.FindFirstRecordByFilter("routes", "alias = 'bad'"); err == nil {
+		t.Fatal("failed import partially wrote a route")
+	}
+}
+
+func TestRoutesUsageSplitsByEndpoint(t *testing.T) {
+	app := newTestApp(t)
+	s, err := Open(app, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	providerID := seedConfig(t, app, s)
+	seedRoute(t, app, "alias", providerID, "img-x", "image")
+	secret, err := s.CreateAPIKey(app, "split-endpoint")
+	if err != nil {
+		t.Fatal(err)
+	}
+	key, err := s.Authenticate(context.Background(), secret)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	sink := NewLogSink(app)
+	rec := gateway.Record{
+		KeyID: key.ID, KeyName: "split-endpoint", Alias: "alias", Endpoint: gateway.EndpointImage,
+		ProviderID: providerID, ProviderName: "prov", UpstreamModel: "img-x",
+		Outcome: gateway.OutcomeCompleted, Status: 200, StartedAt: testStartedAt,
+	}
+	if err := sink.Write(context.Background(), rec); err != nil {
+		t.Fatal(err)
+	}
+
+	rows, err := app.FindAllRecords("routes_usage")
+	if err != nil {
+		t.Fatal(err)
+	}
+	counts := map[string][2]int{}
+	for _, row := range rows {
+		if row.GetString("alias") != "alias" {
+			continue
+		}
+		counts[row.GetString("endpoint_type")] = [2]int{row.GetInt("success_requests"), row.GetInt("fail_requests")}
+	}
+	if counts["image"] != [2]int{1, 0} {
+		t.Fatalf("image row counts = %v, want one success", counts)
+	}
+	if counts["chat"] != [2]int{0, 0} {
+		t.Fatalf("chat row counts = %v, want zeros", counts)
+	}
+}
+
+func TestLogCostAndImageFiles(t *testing.T) {
+	app := newTestApp(t)
+	s, err := Open(app, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	providerID := seedConfig(t, app, s)
+	secret, err := s.CreateAPIKey(app, "imglog")
+	if err != nil {
+		t.Fatal(err)
+	}
+	key, err := s.Authenticate(context.Background(), secret)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	sink := NewLogSink(app)
+	cost := 0.04
+	total := int64(4175)
+	rec := gateway.Record{
+		KeyID: key.ID, KeyName: "imglog", Alias: "pic", Endpoint: gateway.EndpointImage,
+		ProviderID: providerID, ProviderName: "prov", UpstreamModel: "img-x",
+		Usage:     gateway.Usage{TotalTokens: &total, Cost: &cost},
+		TotalMS:   12,
+		Status:    200,
+		Outcome:   gateway.OutcomeCompleted,
+		StartedAt: testStartedAt,
+		Bodies:    &gateway.Bodies{Request: "req", Response: "resp"},
+		Images: []gateway.GeneratedImage{
+			{Data: []byte("first-bytes"), Name: "pic-0.png", MediaType: "image/png"},
+			{Data: []byte("second-bytes"), Name: "pic-1.jpg", MediaType: "image/jpeg"},
+		},
+	}
+	if err := sink.Write(context.Background(), rec); err != nil {
+		t.Fatalf("write log: %v", err)
+	}
+
+	logs, err := app.FindAllRecords("request_logs")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(logs) != 1 {
+		t.Fatalf("expected 1 log, got %d", len(logs))
+	}
+	if got := logs[0].GetFloat("cost"); got != 0.04 {
+		t.Fatalf("cost = %v, want 0.04", got)
+	}
+
+	images, err := app.FindAllRecords("request_images")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(images) != 2 {
+		t.Fatalf("expected 2 image rows, got %d", len(images))
+	}
+	for i, row := range images {
+		if row.GetString("log") != logs[0].Id {
+			t.Fatalf("row %d links to %q, want log %q", i, row.GetString("log"), logs[0].Id)
+		}
+		if row.GetInt("position") != i {
+			t.Fatalf("row %d position = %d", i, row.GetInt("position"))
+		}
+		name := row.GetString("image")
+		if name == "" {
+			t.Fatalf("row %d has no stored file", i)
+		}
+		if i == 0 && (!strings.HasSuffix(name, ".png") || row.GetString("media_type") != "image/png") {
+			t.Fatalf("unexpected first image %q media %q", name, row.GetString("media_type"))
+		}
+	}
+}
+
+func TestImageFilesExpireWithRetention(t *testing.T) {
+	app := newTestApp(t)
+	s, err := Open(app, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	providerID := seedConfig(t, app, s)
+	secret, err := s.CreateAPIKey(app, "imgexpire")
+	if err != nil {
+		t.Fatal(err)
+	}
+	key, err := s.Authenticate(context.Background(), secret)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	sink := NewLogSink(app)
+	rec := gateway.Record{
+		KeyID: key.ID, KeyName: "imgexpire", Alias: "pic", Endpoint: gateway.EndpointImage,
+		ProviderID: providerID, ProviderName: "prov", UpstreamModel: "img-x",
+		TotalMS: 12, Status: 200, Outcome: gateway.OutcomeCompleted, StartedAt: testStartedAt,
+		Images: []gateway.GeneratedImage{{Data: []byte("x"), Name: "pic-0.png", MediaType: "image/png"}},
+	}
+	if err := sink.Write(context.Background(), rec); err != nil {
+		t.Fatal(err)
+	}
+
+	// Age the image row behind the autodate field, then run the job with a
+	// retention that only catches it.
+	old := time.Now().Add(-2 * time.Hour).UTC().Format("2006-01-02 15:04:05.000Z")
+	if _, err := app.DB().NewQuery("UPDATE {{request_images}} SET [[created]] = {:old}").
+		Bind(dbx.Params{"old": old}).Execute(); err != nil {
+		t.Fatal(err)
+	}
+	sink.retentionFn = func() time.Duration { return time.Hour }
+	sink.retentionJob(app)()
+
+	remaining, err := app.FindAllRecords("request_images")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(remaining) != 0 {
+		t.Fatalf("expected expired images deleted, got %d", len(remaining))
+	}
+	// The log row itself is history and stays.
+	logs, err := app.FindAllRecords("request_logs")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(logs) != 1 {
+		t.Fatalf("expected log row kept, got %d", len(logs))
 	}
 }

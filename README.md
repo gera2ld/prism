@@ -66,6 +66,26 @@ curl http://localhost:8090/v1/chat/completions \
 Streaming works as usual (`"stream": true`); `GET /v1/models` lists usable aliases in
 OpenAI's shape.
 
+Image generation is a second passthrough on the same routing table, in two shapes:
+`POST /v1/images/generations` takes OpenAI's shape (`model`, `prompt`, `size`, …) and
+forwards to `{base_url}/images/generations`; `POST /v1/images` takes OpenRouter's
+shape and forwards to `{base_url}/images`. Add a route with `endpoint_type: image`
+for the alias and point your client at whichever surface its upstream speaks:
+
+```bash
+curl http://localhost:8090/v1/images/generations \
+  -H "Authorization: Bearer sk-…" \
+  -H "Content-Type: application/json" \
+  -d '{"model": "<image-alias>", "prompt": "a red panda astronaut", "size": "1024x1024"}'
+```
+
+Responses (`data[].url` / `data[].b64_json`, `usage`) are relayed untouched; token usage
+and provider-reported cost land in `request_logs` like chat, without TTFT.
+When body capture is on, inline base64 outputs are additionally decoded into `request_images`
+files (the captured response text keeps blanks instead of megabytes of base64) and expire
+with the same retention schedule. `GET /v1/models` advertises per-alias
+`supported_endpoint_types` in new-api's vocabulary (`openai`, `image-generation`).
+
 ## Tools
 
 Prism can hand an agent the tools it is allowed to call, and run one on request. It does
@@ -133,11 +153,13 @@ Everything lives in the admin UI; edits apply without a restart.
 | Area | What it does |
 | --- | --- |
 | `providers` | Upstreams: name, base URL, token, on/off switch |
-| `routes` | Alias → provider + upstream model, with priority |
+| `routes` | Alias → provider + upstream model per endpoint kind (`chat`/`image`), with priority |
 | `api_keys` | Client keys, on/off switch, optional RE2 allowlists (`alias_pattern`, `provider_pattern`, `model_pattern`; empty means unrestricted) |
 | `transformers` | JSONata reshaping per provider + model pattern, first match wins |
 | `gateway_settings` | Body-capture toggle, capture retention, cleanup schedule |
-| `request_logs` | Append-only usage history (tokens, timing, finish reason, outcome) |
+| `request_logs` | Append-only usage history (tokens, cost, timing, finish reason, outcome) |
+| `request_bodies` | Captured request/response payload, auto-expiring |
+| `request_images` | Generated image files, saved when capture is on, auto-expiring |
 | `tools` | Your own tools, as conduit definitions, with an on/off switch |
 | `tool_logs` | Append-only tool invocation history (tool, transport, outcome, duration) |
 

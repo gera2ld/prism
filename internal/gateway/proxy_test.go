@@ -18,6 +18,9 @@ type fakeConfig struct {
 	token     string
 	key       gateway.Key
 	targets   []gateway.Target
+	image     []gateway.Target
+	models    []string
+	named     map[string]map[gateway.EndpointType][]gateway.Target
 	transform func([]byte) ([]byte, string, error)
 }
 
@@ -32,11 +35,35 @@ func (f *fakeConfig) Authenticate(_ context.Context, presented string) (gateway.
 	return key, nil
 }
 
-func (f *fakeConfig) Resolve(_ context.Context, alias string) ([]gateway.Target, error) {
+func (f *fakeConfig) Resolve(_ context.Context, endpoint gateway.EndpointType, alias string) ([]gateway.Target, error) {
+	if f.named != nil {
+		targets := f.named[alias][endpoint]
+		if len(targets) == 0 {
+			return nil, gateway.ErrUnknownModel
+		}
+		return targets, nil
+	}
+	if endpoint == gateway.EndpointImage {
+		if len(f.image) == 0 {
+			return nil, gateway.ErrUnknownModel
+		}
+		return f.image, nil
+	}
+	if len(f.targets) == 0 {
+		return nil, gateway.ErrUnknownModel
+	}
 	return f.targets, nil
 }
 
-func (f *fakeConfig) Models(_ context.Context) ([]string, error) { return []string{"alias"}, nil }
+func (f *fakeConfig) Models(_ context.Context) ([]string, error) {
+	if f.models != nil {
+		return f.models, nil
+	}
+	if len(f.targets) > 0 || len(f.image) > 0 {
+		return []string{"alias"}, nil
+	}
+	return nil, nil
+}
 
 func (f *fakeConfig) Transform(_ context.Context, _ gateway.Target, body []byte) ([]byte, string, error) {
 	if f.transform != nil {
@@ -801,5 +828,569 @@ func TestProxyModelsRespectsPolicy(t *testing.T) {
 	proxy.ServeHTTP(rec, req)
 	if rec.Code != 200 || strings.Contains(rec.Body.String(), `"id":"alias"`) {
 		t.Fatalf("disallowed alias must be hidden, got %d %s", rec.Code, rec.Body.String())
+	}
+}
+
+func newImageUpstream(t *testing.T, seen *string, key string) *httptest.Server {
+	t.Helper()
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/images" {
+			t.Errorf("upstream path = %q, want /images", r.URL.Path)
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		body, _ := io.ReadAll(r.Body)
+		var req struct {
+			Model  string `json:"model"`
+			Prompt string `json:"prompt"`
+		}
+		_ = json.Unmarshal(body, &req)
+		*seen = req.Model
+		if got := r.Header.Get("Authorization"); got != "Bearer "+key {
+			w.WriteHeader(http.StatusUnauthorized)
+			_, _ = w.Write([]byte(`{"error":"bad key"}`))
+			return
+		}
+		if req.Model != "img-x" {
+			w.WriteHeader(http.StatusBadRequest)
+			_, _ = w.Write([]byte(`{"error":"bad model"}`))
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"created": 1748372400,
+			"data": []any{map[string]any{
+				"b64_json":   "aW1hZ2UtYnl0ZXM=",
+				"media_type": "image/png",
+			}},
+			"usage": map[string]any{
+				"prompt_tokens": 12, "completion_tokens": 4163, "total_tokens": 4175, "cost": 0.04,
+			},
+		})
+	}))
+}
+
+func TestProxyImagesPassthrough(t *testing.T) {
+	var seen string
+	upstream := newImageUpstream(t, &seen, "upstream-key")
+	defer upstream.Close()
+
+	sink := &sliceSink{}
+	proxy := gateway.New(&fakeConfig{
+		token: "client-key",
+		image: []gateway.Target{{ProviderID: "p1", ProviderName: "prov", BaseURL: upstream.URL, APIKey: "upstream-key", Model: "img-x"}},
+	}, sink, nil)
+	proxy.Capture = func() bool { return true }
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/v1/images", strings.NewReader(`{"model":"alias","prompt":"a red panda astronaut"}`))
+	req.Header.Set("Authorization", "Bearer client-key")
+	proxy.ServeHTTP(rec, req)
+	if rec.Code != 200 {
+		t.Fatalf("status = %d, body %s", rec.Code, rec.Body.String())
+	}
+	if seen != "img-x" {
+		t.Fatalf("upstream got model %q, want rewritten img-x", seen)
+	}
+	var resp struct {
+		Data []struct {
+			B64 string `json:"b64_json"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatal(err)
+	}
+	if len(resp.Data) != 1 || resp.Data[0].B64 != "aW1hZ2UtYnl0ZXM=" {
+		t.Fatalf("unexpected image body %s", rec.Body.String())
+	}
+	if len(sink.records) != 1 {
+		t.Fatalf("expected 1 record, got %d", len(sink.records))
+	}
+	got := sink.records[0]
+	if got.Endpoint != gateway.EndpointImage || got.Alias != "alias" {
+		t.Fatalf("unexpected endpoint/alias %+v", got)
+	}
+	if got.Usage.TotalTokens == nil || *got.Usage.TotalTokens != 4175 {
+		t.Fatalf("expected logged total 4175, got %+v", got.Usage)
+	}
+	if got.Usage.Cost == nil || *got.Usage.Cost != 0.04 {
+		t.Fatalf("expected logged cost 0.04, got %+v", got.Usage)
+	}
+	if len(got.Images) != 1 || string(got.Images[0].Data) != "image-bytes" {
+		t.Fatalf("expected one decoded image file, got %+v", got.Images)
+	}
+	if got.Images[0].Name != "alias-0.png" || got.Images[0].MediaType != "image/png" {
+		t.Fatalf("unexpected image file %+v", got.Images[0])
+	}
+	// Capture holds the redacted response: structure intact, payload blank.
+	if got.Bodies == nil || strings.Contains(got.Bodies.Response, "aW1hZ2UtYnl0ZXM=") {
+		t.Fatalf("captured response should redact saved base64, got %+v", got.Bodies)
+	}
+	if !strings.Contains(got.Bodies.Response, `"b64_json":""`) {
+		t.Fatalf("captured response should keep the blanked key, got %s", got.Bodies.Response)
+	}
+	if got.Status != 200 || got.Outcome != gateway.OutcomeCompleted || got.Stream || got.TTFTMS != nil {
+		t.Fatalf("unexpected image record %+v", got)
+	}
+	if got.FinishReason != nil {
+		t.Fatalf("images have no finish reason, got %+v", got)
+	}
+}
+
+func TestProxyImagesValidation(t *testing.T) {
+	proxy := gateway.New(&fakeConfig{
+		token: "k",
+		image: []gateway.Target{{BaseURL: "http://upstream.test", Model: "img-x"}},
+	}, &sliceSink{}, nil)
+	for name, body := range map[string]string{
+		"missing prompt": `{"model":"alias"}`,
+		"missing model":  `{"prompt":"hi"}`,
+		"not json":       `{{{`,
+		"stream":         `{"model":"alias","prompt":"hi","stream":true}`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			rec := httptest.NewRecorder()
+			req := httptest.NewRequest(http.MethodPost, "/v1/images", strings.NewReader(body))
+			req.Header.Set("Authorization", "Bearer k")
+			proxy.ServeHTTP(rec, req)
+			if rec.Code != 400 {
+				t.Fatalf("expected 400, got %d %s", rec.Code, rec.Body.String())
+			}
+		})
+	}
+}
+
+func TestProxyImagesAuthAndRouting(t *testing.T) {
+	var seen string
+	upstream := newImageUpstream(t, &seen, "upstream-key")
+	defer upstream.Close()
+	target := gateway.Target{ProviderID: "p1", ProviderName: "prov", BaseURL: upstream.URL, APIKey: "upstream-key", Model: "img-x"}
+
+	t.Run("unauthorized", func(t *testing.T) {
+		proxy := gateway.New(&fakeConfig{token: "k", image: []gateway.Target{target}}, &sliceSink{}, nil)
+		rec := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodPost, "/v1/images", strings.NewReader(`{"model":"alias","prompt":"hi"}`))
+		proxy.ServeHTTP(rec, req)
+		if rec.Code != 401 {
+			t.Fatalf("expected 401, got %d", rec.Code)
+		}
+	})
+
+	t.Run("unknown model", func(t *testing.T) {
+		sink := &sliceSink{}
+		proxy := gateway.New(&fakeConfig{token: "k"}, sink, nil)
+		rec := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodPost, "/v1/images", strings.NewReader(`{"model":"alias","prompt":"hi"}`))
+		req.Header.Set("Authorization", "Bearer k")
+		proxy.ServeHTTP(rec, req)
+		if rec.Code != 404 {
+			t.Fatalf("expected 404, got %d %s", rec.Code, rec.Body.String())
+		}
+		if len(sink.records) != 0 {
+			t.Fatalf("unknown models are not logged, got %+v", sink.records)
+		}
+	})
+
+	t.Run("chat-only alias is unknown to images", func(t *testing.T) {
+		sink := &sliceSink{}
+		proxy := gateway.New(&fakeConfig{
+			token:   "k",
+			targets: []gateway.Target{{ProviderID: "p1", ProviderName: "prov", BaseURL: upstream.URL, Model: "gpt-x"}},
+		}, sink, nil)
+		rec := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodPost, "/v1/images", strings.NewReader(`{"model":"alias","prompt":"hi"}`))
+		req.Header.Set("Authorization", "Bearer k")
+		proxy.ServeHTTP(rec, req)
+		if rec.Code != 404 {
+			t.Fatalf("expected 404 for a chat-only alias, got %d %s", rec.Code, rec.Body.String())
+		}
+	})
+
+	t.Run("denied key", func(t *testing.T) {
+		sink := &sliceSink{}
+		proxy := gateway.New(&fakeConfig{token: "k", key: policyKey(t, `^other`, "", ""), image: []gateway.Target{target}}, sink, nil)
+		rec := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodPost, "/v1/images", strings.NewReader(`{"model":"alias","prompt":"hi"}`))
+		req.Header.Set("Authorization", "Bearer k")
+		proxy.ServeHTTP(rec, req)
+		if rec.Code != 403 {
+			t.Fatalf("expected 403, got %d %s", rec.Code, rec.Body.String())
+		}
+		if len(sink.records) != 1 || sink.records[0].Outcome != gateway.OutcomeRejected || sink.records[0].Endpoint != gateway.EndpointImage {
+			t.Fatalf("expected logged image rejection, got %+v", sink.records)
+		}
+	})
+}
+
+func TestProxyImagesUpstreamError(t *testing.T) {
+	sink := &sliceSink{}
+	proxy := gateway.New(&fakeConfig{
+		token: "k",
+		image: []gateway.Target{{ProviderID: "p1", ProviderName: "prov", BaseURL: "http://upstream.test", Model: "img-x"}},
+	}, sink, nil)
+	proxy.Client = &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+		return &http.Response{
+			StatusCode: http.StatusBadRequest,
+			Header:     make(http.Header),
+			Body:       io.NopCloser(strings.NewReader(`{"error":"bad prompt"}`)),
+		}, nil
+	})}
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/v1/images", strings.NewReader(`{"model":"alias","prompt":"hi"}`))
+	req.Header.Set("Authorization", "Bearer k")
+	proxy.ServeHTTP(rec, req)
+	if rec.Code != 400 || !strings.Contains(rec.Body.String(), "bad prompt") {
+		t.Fatalf("expected upstream error relay, got %d %s", rec.Code, rec.Body.String())
+	}
+	if len(sink.records) != 1 || sink.records[0].Outcome != gateway.OutcomeUpstreamError || sink.records[0].Status != 400 {
+		t.Fatalf("unexpected record %+v", sink.records)
+	}
+}
+
+func TestProxyImagesAppliesTransformer(t *testing.T) {
+	var seen string
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		seen = string(body)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"data":[],"usage":{"total_tokens":1}}`))
+	}))
+	defer upstream.Close()
+
+	sink := &sliceSink{}
+	cfg := &fakeConfig{
+		token: "k",
+		image: []gateway.Target{{ProviderID: "p1", ProviderName: "prov", BaseURL: upstream.URL, Model: "img-x"}},
+		transform: func(body []byte) ([]byte, string, error) {
+			var in map[string]any
+			if err := json.Unmarshal(body, &in); err != nil {
+				return nil, "", err
+			}
+			in["quality"] = "high"
+			out, _ := json.Marshal(in)
+			return out, "hd", nil
+		},
+	}
+	proxy := gateway.New(cfg, sink, nil)
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/v1/images", strings.NewReader(`{"model":"alias","prompt":"hi"}`))
+	req.Header.Set("Authorization", "Bearer k")
+	proxy.ServeHTTP(rec, req)
+	if rec.Code != 200 {
+		t.Fatalf("status = %d", rec.Code)
+	}
+	if !strings.Contains(seen, `"quality":"high"`) || !strings.Contains(seen, `"model":"img-x"`) {
+		t.Fatalf("upstream got unshaped body: %s", seen)
+	}
+	if len(sink.records) != 1 || sink.records[0].Transformer != "hd" {
+		t.Fatalf("expected logged transformer name, got %+v", sink.records)
+	}
+}
+
+func TestProxyModelsAdvertisesEndpointTypes(t *testing.T) {
+	chatOnly := gateway.Target{ProviderID: "p1", ProviderName: "prov", BaseURL: "http://x", Model: "gpt-x"}
+	imgOnly := gateway.Target{ProviderID: "p1", ProviderName: "prov", BaseURL: "http://x", Model: "img-x"}
+	proxy := gateway.New(&fakeConfig{
+		token:  "k",
+		models: []string{"both", "chat-only", "image-only"},
+		named: map[string]map[gateway.EndpointType][]gateway.Target{
+			"both":       {gateway.EndpointChat: {chatOnly}, gateway.EndpointImage: {imgOnly}},
+			"chat-only":  {gateway.EndpointChat: {chatOnly}},
+			"image-only": {gateway.EndpointImage: {imgOnly}},
+		},
+	}, &sliceSink{}, nil)
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/v1/models", nil)
+	req.Header.Set("Authorization", "Bearer k")
+	proxy.ServeHTTP(rec, req)
+	if rec.Code != 200 {
+		t.Fatalf("status = %d", rec.Code)
+	}
+	body := rec.Body.String()
+	for _, want := range []string{
+		`"id":"both"`, `"supported_endpoint_types":["openai","image-generation"]`,
+		`"id":"chat-only"`, `"supported_endpoint_types":["openai"]`,
+		`"id":"image-only"`, `"supported_endpoint_types":["image-generation"]`,
+	} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("models response missing %s: %s", want, body)
+		}
+	}
+}
+
+func TestProxyImageGenerationsPassthrough(t *testing.T) {
+	var seenPath, seenModel, seenSize string
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		seenPath = r.URL.Path
+		body, _ := io.ReadAll(r.Body)
+		var req struct {
+			Model          string `json:"model"`
+			Prompt         string `json:"prompt"`
+			Size           string `json:"size"`
+			ResponseFormat string `json:"response_format"`
+		}
+		_ = json.Unmarshal(body, &req)
+		seenModel, seenSize = req.Model, req.Size
+		if got := r.Header.Get("Authorization"); got != "Bearer upstream-key" {
+			w.WriteHeader(http.StatusUnauthorized)
+			return
+		}
+		if req.Model != "dall-e-3" || req.Prompt == "" {
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"created": 1748372400,
+			"data": []any{map[string]any{
+				"url":            "https://images.example/1.png",
+				"revised_prompt": "a revised panda",
+			}},
+		})
+	}))
+	defer upstream.Close()
+
+	sink := &sliceSink{}
+	proxy := gateway.New(&fakeConfig{
+		token: "client-key",
+		image: []gateway.Target{{ProviderID: "p1", ProviderName: "prov", BaseURL: upstream.URL, APIKey: "upstream-key", Model: "dall-e-3"}},
+	}, sink, nil)
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/v1/images/generations", strings.NewReader(
+		`{"model":"alias","prompt":"a red panda","n":1,"size":"1024x1024","response_format":"url"}`))
+	req.Header.Set("Authorization", "Bearer client-key")
+	proxy.ServeHTTP(rec, req)
+	if rec.Code != 200 {
+		t.Fatalf("status = %d, body %s", rec.Code, rec.Body.String())
+	}
+	if seenPath != "/images/generations" {
+		t.Fatalf("upstream path = %q, want /images/generations", seenPath)
+	}
+	if seenModel != "dall-e-3" || seenSize != "1024x1024" {
+		t.Fatalf("upstream got model %q size %q", seenModel, seenSize)
+	}
+	if !strings.Contains(rec.Body.String(), "https://images.example/1.png") {
+		t.Fatalf("unexpected body %s", rec.Body.String())
+	}
+	if len(sink.records) != 1 {
+		t.Fatalf("expected 1 record, got %d", len(sink.records))
+	}
+	got := sink.records[0]
+	if got.Endpoint != gateway.EndpointImage || got.Outcome != gateway.OutcomeCompleted || got.Status != 200 {
+		t.Fatalf("unexpected record %+v", got)
+	}
+}
+
+func TestProxyImageGenerationsValidation(t *testing.T) {
+	proxy := gateway.New(&fakeConfig{
+		token: "k",
+		image: []gateway.Target{{BaseURL: "http://upstream.test", Model: "img-x"}},
+	}, &sliceSink{}, nil)
+	for name, body := range map[string]string{
+		"missing prompt": `{"model":"alias"}`,
+		"missing model":  `{"prompt":"hi"}`,
+		"not json":       `{{{`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			rec := httptest.NewRecorder()
+			req := httptest.NewRequest(http.MethodPost, "/v1/images/generations", strings.NewReader(body))
+			req.Header.Set("Authorization", "Bearer k")
+			proxy.ServeHTTP(rec, req)
+			if rec.Code != 400 {
+				t.Fatalf("expected 400, got %d %s", rec.Code, rec.Body.String())
+			}
+		})
+	}
+
+	t.Run("chat-only alias is unknown", func(t *testing.T) {
+		sink := &sliceSink{}
+		chatOnly := gateway.New(&fakeConfig{
+			token:   "k",
+			targets: []gateway.Target{{ProviderID: "p1", ProviderName: "prov", BaseURL: "http://upstream.test", Model: "gpt-x"}},
+		}, sink, nil)
+		rec := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodPost, "/v1/images/generations", strings.NewReader(`{"model":"alias","prompt":"hi"}`))
+		req.Header.Set("Authorization", "Bearer k")
+		chatOnly.ServeHTTP(rec, req)
+		if rec.Code != 404 {
+			t.Fatalf("expected 404, got %d %s", rec.Code, rec.Body.String())
+		}
+	})
+}
+
+func TestProxyImagesNoFilesWithoutCapture(t *testing.T) {
+	var seen string
+	upstream := newImageUpstream(t, &seen, "upstream-key")
+	defer upstream.Close()
+
+	sink := &sliceSink{}
+	proxy := gateway.New(&fakeConfig{
+		token: "client-key",
+		image: []gateway.Target{{ProviderID: "p1", ProviderName: "prov", BaseURL: upstream.URL, APIKey: "upstream-key", Model: "img-x"}},
+	}, sink, nil)
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/v1/images", strings.NewReader(`{"model":"alias","prompt":"hi"}`))
+	req.Header.Set("Authorization", "Bearer client-key")
+	proxy.ServeHTTP(rec, req)
+	if rec.Code != 200 {
+		t.Fatalf("status = %d", rec.Code)
+	}
+	if len(sink.records) != 1 {
+		t.Fatalf("expected 1 record, got %d", len(sink.records))
+	}
+	got := sink.records[0]
+	if len(got.Images) != 0 || got.Bodies != nil {
+		t.Fatalf("capture off must store neither files nor bodies, got %+v", got)
+	}
+	// The client still receives the full payload.
+	if !strings.Contains(rec.Body.String(), "aW1hZ2UtYnl0ZXM=") {
+		t.Fatalf("relay must be byte-identical, got %s", rec.Body.String())
+	}
+}
+
+func TestProxyImagesFileExtractionCases(t *testing.T) {
+	pngB64 := "aW1hZ2UtYnl0ZXM=" // "image-bytes"
+	cases := []struct {
+		name       string
+		data       string
+		wantFiles  int
+		wantName   string
+		wantMedia  string
+		wantData   string
+		wantText   string
+		wantAbsent string
+	}{
+		{
+			name:       "plain base64",
+			data:       `{"b64_json":"` + pngB64 + `","media_type":"image/png"}`,
+			wantFiles:  1,
+			wantName:   "alias-0.png",
+			wantMedia:  "image/png",
+			wantData:   "image-bytes",
+			wantText:   `"b64_json":""`,
+			wantAbsent: pngB64,
+		},
+		{
+			name: "data url prefix and whitespace",
+			// \n is a JSON escape here, so the payload parses with whitespace.
+			data:       `{"b64_json":"  data:image/png;base64,` + pngB64[:4] + `\n` + pngB64[4:] + `  ","media_type":"image/png"}`,
+			wantFiles:  1,
+			wantName:   "alias-0.png",
+			wantMedia:  "image/png",
+			wantData:   "image-bytes",
+			wantText:   `"b64_json":""`,
+			wantAbsent: pngB64,
+		},
+		{
+			name:       "sniffed media type",
+			data:       `{"b64_json":"iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg=="}`,
+			wantFiles:  1,
+			wantName:   "alias-0.png",
+			wantMedia:  "image/png",
+			wantData:   "",
+			wantText:   `"b64_json":""`,
+			wantAbsent: "iVBORw0KGgo",
+		},
+		{
+			name:       "invalid base64 keeps text",
+			data:       `{"b64_json":"!!!not-base64!!!","media_type":"image/png"}`,
+			wantFiles:  0,
+			wantText:   "!!!not-base64!!!",
+			wantAbsent: "",
+		},
+		{
+			name:       "url output is never downloaded",
+			data:       `{"url":"https://images.example/1.png"}`,
+			wantFiles:  0,
+			wantText:   "https://images.example/1.png",
+			wantAbsent: "",
+		},
+		{
+			name:       "non-image media type skipped",
+			data:       `{"b64_json":"` + pngB64 + `","media_type":"application/octet-stream"}`,
+			wantFiles:  0,
+			wantText:   pngB64,
+			wantAbsent: "",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = io.WriteString(w, `{"created":1,"data":[`+tc.data+`],"usage":{}}`)
+			}))
+			defer upstream.Close()
+
+			sink := &sliceSink{}
+			proxy := gateway.New(&fakeConfig{
+				token: "k",
+				image: []gateway.Target{{ProviderID: "p1", ProviderName: "prov", BaseURL: upstream.URL, Model: "img-x"}},
+			}, sink, nil)
+			proxy.Capture = func() bool { return true }
+
+			rec := httptest.NewRecorder()
+			req := httptest.NewRequest(http.MethodPost, "/v1/images", strings.NewReader(`{"model":"alias","prompt":"hi"}`))
+			req.Header.Set("Authorization", "Bearer k")
+			proxy.ServeHTTP(rec, req)
+			if rec.Code != 200 {
+				t.Fatalf("status = %d", rec.Code)
+			}
+			if len(sink.records) != 1 {
+				t.Fatalf("expected 1 record, got %d", len(sink.records))
+			}
+			got := sink.records[0]
+			if len(got.Images) != tc.wantFiles {
+				t.Fatalf("files = %d, want %d (%+v)", len(got.Images), tc.wantFiles, got.Images)
+			}
+			if tc.wantFiles == 1 {
+				if got.Images[0].Name != tc.wantName || got.Images[0].MediaType != tc.wantMedia {
+					t.Fatalf("unexpected file %+v", got.Images[0])
+				}
+				if tc.wantData != "" && string(got.Images[0].Data) != tc.wantData {
+					t.Fatalf("unexpected file bytes %q", got.Images[0].Data)
+				}
+				if len(got.Images[0].Data) == 0 {
+					t.Fatal("empty file bytes")
+				}
+			}
+			if got.Bodies == nil {
+				t.Fatal("expected captured bodies")
+			}
+			if !strings.Contains(got.Bodies.Response, tc.wantText) {
+				t.Fatalf("captured response missing %q in %s", tc.wantText, got.Bodies.Response)
+			}
+			if tc.wantAbsent != "" && strings.Contains(got.Bodies.Response, tc.wantAbsent) {
+				t.Fatalf("captured response should redact %q in %s", tc.wantAbsent, got.Bodies.Response)
+			}
+		})
+	}
+}
+
+func TestProxyImagesFilenameSanitizesAlias(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"created":1,"data":[{"b64_json":"aGk=","media_type":"image/jpeg"}],"usage":{}}`)
+	}))
+	defer upstream.Close()
+
+	sink := &sliceSink{}
+	proxy := gateway.New(&fakeConfig{
+		token: "k",
+		image: []gateway.Target{{ProviderID: "p1", ProviderName: "prov", BaseURL: upstream.URL, Model: "img-x"}},
+	}, sink, nil)
+	proxy.Capture = func() bool { return true }
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/v1/images", strings.NewReader(`{"model":"qwen/qwen3:free","prompt":"hi"}`))
+	req.Header.Set("Authorization", "Bearer k")
+	proxy.ServeHTTP(rec, req)
+	if rec.Code != 200 {
+		t.Fatalf("status = %d", rec.Code)
+	}
+	got := sink.records[0]
+	if len(got.Images) != 1 || got.Images[0].Name != "qwen_qwen3_free-0.jpg" {
+		t.Fatalf("unexpected files %+v", got.Images)
 	}
 }

@@ -47,6 +47,8 @@ func TestPrismAPISpec(t *testing.T) {
 		"/api/prism/routes/import":           {"post"},
 		"/v1/chat/completions":               {"post"},
 		"/v1/models":                         {"get"},
+		"/v1/images":                         {"post"},
+		"/v1/images/generations":             {"post"},
 		"/v1/tools":                          {"get"},
 		"/v1/tools/{name}/invoke":            {"post"},
 		"/api/prism/tools":                   {"get"},

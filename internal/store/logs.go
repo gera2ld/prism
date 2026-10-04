@@ -7,6 +7,7 @@ import (
 	"github.com/pocketbase/dbx"
 	"github.com/pocketbase/pocketbase/core"
 	"github.com/pocketbase/pocketbase/tools/cron"
+	"github.com/pocketbase/pocketbase/tools/filesystem"
 
 	"github.com/gera2ld/prism/internal/gateway"
 )
@@ -37,6 +38,7 @@ func (l *LogStore) Write(ctx context.Context, rec gateway.Record) error {
 	record.Set("api_key", rec.KeyID)
 	record.Set("api_key_name", rec.KeyName)
 	record.Set("alias", rec.Alias)
+	record.Set("endpoint_type", string(rec.Endpoint))
 	record.Set("provider", rec.ProviderID)
 	record.Set("provider_name", rec.ProviderName)
 	record.Set("upstream_model", rec.UpstreamModel)
@@ -46,6 +48,7 @@ func (l *LogStore) Write(ctx context.Context, rec gateway.Record) error {
 	record.Set("completion_tokens", nullable(rec.Usage.CompletionTokens))
 	record.Set("total_tokens", nullable(rec.Usage.TotalTokens))
 	record.Set("cached_tokens", nullable(rec.Usage.CachedTokens))
+	record.Set("cost", nullable(rec.Usage.Cost))
 	record.Set("ttft_ms", nullable(rec.TTFTMS))
 	record.Set("total_ms", rec.TotalMS)
 	// Gateway-side request start in UTC. Zero (handmade records only) stays
@@ -61,7 +64,17 @@ func (l *LogStore) Write(ctx context.Context, rec gateway.Record) error {
 		return err
 	}
 	if rec.Bodies != nil {
-		return l.saveBody(ctx, record.Id, rec.Bodies)
+		if err := l.saveBody(ctx, record.Id, rec.Bodies); err != nil {
+			return err
+		}
+	}
+	// Image files persist only what capture redacted from the response
+	// text. The log row above is already saved, so a file failure loses
+	// files, never history; p.write surfaces it in the server log.
+	if len(rec.Images) > 0 {
+		if err := l.saveImages(ctx, record.Id, rec.Images); err != nil {
+			return err
+		}
 	}
 	return nil
 }
@@ -77,6 +90,31 @@ func (l *LogStore) saveBody(ctx context.Context, logID string, bodies *gateway.B
 	record.Set("response", bodies.Response)
 	record.Set("truncated", bodies.Truncated)
 	return l.app.SaveWithContext(ctx, record)
+}
+
+// saveImages persists one request_images row per decoded output, in
+// response order. Position disambiguates multi-image responses; the log
+// relation ties each file back to its request.
+func (l *LogStore) saveImages(ctx context.Context, logID string, images []gateway.GeneratedImage) error {
+	collection, err := l.app.FindCollectionByNameOrId("request_images")
+	if err != nil {
+		return err
+	}
+	for i, img := range images {
+		file, err := filesystem.NewFileFromBytes(img.Data, img.Name)
+		if err != nil {
+			return err
+		}
+		record := core.NewRecord(collection)
+		record.Set("log", logID)
+		record.Set("image", file)
+		record.Set("media_type", img.MediaType)
+		record.Set("position", i)
+		if err := l.app.SaveWithContext(ctx, record); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func (l *LogStore) RegisterRetention(app core.App, schedule string, retentionFn func() time.Duration) error {
@@ -125,6 +163,16 @@ func (l *LogStore) retentionJob(app core.App) func() {
 		_, _ = app.DB().NewQuery("DELETE FROM {{request_bodies}} WHERE [[created]] < {:cutoff}").
 			Bind(dbx.Params{"cutoff": cutoff}).
 			Execute()
+		// Generated images live as file records: a raw SQL delete would
+		// orphan the files on disk, so expired ones go through the record
+		// API, which removes the files too.
+		stale, err := app.FindAllRecords("request_images",
+			dbx.NewExp("created < {:cutoff}", dbx.Params{"cutoff": cutoff}))
+		if err == nil {
+			for _, record := range stale {
+				_ = app.Delete(record)
+			}
+		}
 		// Tool invocations keep their row for the same reason chat requests do:
 		// the count and the outcome are history. Only the captured payload ages
 		// out, so it is cleared rather than the row deleted.

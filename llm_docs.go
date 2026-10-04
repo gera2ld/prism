@@ -102,8 +102,72 @@ var modelsResponseSchema = objProp("Usable aliases for the presented key.", nil,
 		"object":                   strProp("Always model."),
 		"id":                       strProp("Alias."),
 		"owned_by":                 strProp("Provider that would serve the alias."),
-		"supported_endpoint_types": {Type: "array", Description: "Endpoint types this gateway exposes for the alias.", Items: &huma.Schema{Type: "string"}},
+		"supported_endpoint_types": {Type: "array", Description: "Endpoint types this gateway exposes for the alias, in new-api's vocabulary: openai, image-generation, or both.", Items: &huma.Schema{Type: "string"}},
 	})},
+})
+
+var imageRequestSchema = &huma.Schema{
+	Type:        "object",
+	Description: "Only model and prompt are read by the gateway; every other field passes through untouched. The model names a Prism alias backed by an image route and is rewritten to the upstream model before forwarding to {base_url}/images.",
+	Required:    []string{"model", "prompt"},
+	Properties: map[string]*huma.Schema{
+		"model":            strProp("Prism alias as configured in the routing table, e.g. fast-image."),
+		"prompt":           strProp("Text description of the desired image."),
+		"n":                intProp("Upper bound on images to generate. Providers may return fewer."),
+		"aspect_ratio":     strProp("Normalized aspect ratio, e.g. 16:9. Providers clamp to their supported subset."),
+		"resolution":       strProp("Resolution tier, e.g. 1K, 2K."),
+		"size":             strProp("Convenience shorthand, a tier or explicit pixels."),
+		"quality":          strProp("auto, low, medium, or high."),
+		"output_format":    strProp("png, jpeg, webp, or svg. When omitted, the provider default applies."),
+		"background":       strProp("auto, transparent, or opaque."),
+		"seed":             intProp("Seed for deterministic generation, where supported."),
+		"input_references": {Type: "array", Description: "Reference images for image-to-image generation, as base64 data URLs or HTTP(S) URLs.", Items: &huma.Schema{Type: "object", AdditionalProperties: true}},
+	},
+	AdditionalProperties: true,
+}
+
+var imageResponseSchema = objProp("Image generation result, relayed byte-identical from the upstream.", nil, map[string]*huma.Schema{"created": intProp("Unix timestamp (seconds) when the image was generated."),
+	"data": {Type: "array", Description: "Generated images.", Items: objProp("One image.", nil, map[string]*huma.Schema{
+		"b64_json":       strProp("Base64-encoded image bytes."),
+		"media_type":     strProp("Present whenever the format is identifiable, e.g. image/png."),
+		"revised_prompt": strProp("Provider-rewritten prompt, when returned."),
+	})},
+	"usage": objProp("Token usage as reported by the provider; absent fields mean unknown. The provider cost field, when present, is passed through and logged.", nil, map[string]*huma.Schema{
+		"prompt_tokens":     intProp("Prompt tokens."),
+		"completion_tokens": intProp("Completion tokens."),
+		"total_tokens":      intProp("Total tokens."),
+	}),
+})
+
+var openAIImageRequestSchema = &huma.Schema{
+	Type:        "object",
+	Description: "Only model and prompt are read by the gateway; every other OpenAI field passes through untouched. The model names a Prism alias backed by an image route and is rewritten to the upstream model before forwarding to {base_url}/images/generations.",
+	Required:    []string{"model", "prompt"},
+	Properties: map[string]*huma.Schema{
+		"model":           strProp("Prism alias as configured in the routing table, e.g. fast-image."),
+		"prompt":          strProp("Text description of the desired image."),
+		"n":               intProp("Number of images to generate."),
+		"size":            strProp("Image size, e.g. 1024x1024. Supported values depend on the upstream model."),
+		"quality":         strProp("Image quality, e.g. standard, hd, auto, low, medium, high."),
+		"style":           strProp("Image style, e.g. vivid or natural."),
+		"response_format": strProp("url or b64_json. When omitted, the provider default applies."),
+		"user":            strProp("End-user identifier for abuse monitoring, passed through."),
+	},
+	AdditionalProperties: true,
+}
+
+var openAIImageResponseSchema = objProp("Image generation result, relayed byte-identical from the upstream.", nil, map[string]*huma.Schema{
+	"created": intProp("Unix timestamp when the image was generated."),
+	"data": {Type: "array", Description: "Generated images.", Items: objProp("One image.", nil, map[string]*huma.Schema{
+		"url":            strProp("URL of the generated image, when response_format is url."),
+		"b64_json":       strProp("Base64-encoded image bytes, when response_format is b64_json."),
+		"revised_prompt": strProp("Provider-rewritten prompt, when returned."),
+	})},
+	"usage": objProp("Token usage as reported by the provider; absent when the provider reports none.", nil, map[string]*huma.Schema{
+		"prompt_tokens":     intProp("Prompt tokens."),
+		"completion_tokens": intProp("Completion tokens."),
+		"total_tokens":      intProp("Total tokens."),
+	}),
 })
 
 var gatewayErrorSchema = objProp("Gateway error envelope.", nil, map[string]*huma.Schema{
@@ -203,6 +267,56 @@ func registerLLMDocs(api huma.API) {
 					Description: "Usable aliases.",
 					Content: map[string]*huma.MediaType{
 						"application/json": {Schema: modelsResponseSchema},
+					},
+				}
+				return responses
+			}(),
+		},
+	}
+	openAPI.Paths["/v1/images"] = &huma.PathItem{
+		Post: &huma.Operation{
+			OperationID: "create-image",
+			Summary:     "Generate images (OpenRouter shape)",
+			Description: "Image generation over the configured providers, in OpenRouter's shape. The model field names a Prism alias backed by an image route; responses are relayed byte-identical from the upstream. Streaming is not supported. Prefer POST /v1/images/generations for the OpenAI shape.",
+			Tags:        []string{"llm"},
+			Security:    clientKeySecurity,
+			RequestBody: &huma.RequestBody{
+				Required: true,
+				Content: map[string]*huma.MediaType{
+					"application/json": {Schema: imageRequestSchema},
+				},
+			},
+			Responses: func() map[string]*huma.Response {
+				responses := gatewayErrorResponses()
+				responses["200"] = &huma.Response{
+					Description: "Generated images as base64 bytes with usage.",
+					Content: map[string]*huma.MediaType{
+						"application/json": {Schema: imageResponseSchema},
+					},
+				}
+				return responses
+			}(),
+		},
+	}
+	openAPI.Paths["/v1/images/generations"] = &huma.PathItem{
+		Post: &huma.Operation{
+			OperationID: "create-image-generation",
+			Summary:     "Generate images (OpenAI shape)",
+			Description: "Image generation over the configured providers, in OpenAI's images/generations shape. The model field names a Prism alias backed by an image route; responses are relayed byte-identical from the upstream.",
+			Tags:        []string{"llm"},
+			Security:    clientKeySecurity,
+			RequestBody: &huma.RequestBody{
+				Required: true,
+				Content: map[string]*huma.MediaType{
+					"application/json": {Schema: openAIImageRequestSchema},
+				},
+			},
+			Responses: func() map[string]*huma.Response {
+				responses := gatewayErrorResponses()
+				responses["200"] = &huma.Response{
+					Description: "Generated images as URLs or base64 bytes.",
+					Content: map[string]*huma.MediaType{
+						"application/json": {Schema: openAIImageResponseSchema},
 					},
 				}
 				return responses
