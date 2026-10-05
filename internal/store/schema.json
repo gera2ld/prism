@@ -1271,7 +1271,7 @@
     "id": "pbc_3471319058",
     "name": "tools_usage",
     "type": "view",
-    "viewQuery": "SELECT l.tool AS id, l.tool AS tool, l.transport AS transport, MAX(COALESCE(NULLIF(l.started_at, ''), l.created)) AS last_used, COUNT(CASE WHEN l.outcome = 'completed' THEN 1 END) AS success_requests, COUNT(CASE WHEN l.outcome \u003c\u003e 'completed' THEN 1 END) AS fail_requests FROM tool_logs AS l GROUP BY l.tool, l.transport"
+    "viewQuery": "SELECT l.tool AS id, l.tool AS tool, MAX(COALESCE(NULLIF(l.started_at, ''), l.created)) AS last_used, COUNT(CASE WHEN l.outcome = 'completed' THEN 1 END) AS success_requests, COUNT(CASE WHEN l.outcome \u003c\u003e 'completed' THEN 1 END) AS fail_requests FROM tool_logs AS l GROUP BY l.tool"
   },
   {
     "fields": [

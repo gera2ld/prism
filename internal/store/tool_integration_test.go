@@ -319,6 +319,15 @@ func TestToolLogsViewReportsUsage(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
+	// The same tool over both transports stays one row. Grouping by transport
+	// gave two rows sharing an id, which PocketBase rejects once such data
+	// exists, and a rejected view takes the whole schema apply down with it.
+	if err := sink.WriteTool(context.Background(), gateway.ToolRecord{
+		Tool: "weather", Transport: "mcp",
+		Outcome: gateway.ToolOutcomeCompleted, Status: 200, DurationMS: 5,
+	}); err != nil {
+		t.Fatal(err)
+	}
 	records, err := app.FindAllRecords("tools_usage")
 	if err != nil {
 		t.Fatal(err)
@@ -330,8 +339,8 @@ func TestToolLogsViewReportsUsage(t *testing.T) {
 	if row.GetString("id") != "weather" {
 		t.Fatalf("id = %q", row.GetString("id"))
 	}
-	if row.GetInt("success_requests") != 2 || row.GetInt("fail_requests") != 1 {
-		t.Fatalf("counts = %d/%d, want 2/1",
+	if row.GetInt("success_requests") != 3 || row.GetInt("fail_requests") != 1 {
+		t.Fatalf("counts = %d/%d, want 3/1",
 			row.GetInt("success_requests"), row.GetInt("fail_requests"))
 	}
 }

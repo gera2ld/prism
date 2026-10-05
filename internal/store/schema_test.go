@@ -287,9 +287,7 @@ func TestApplySchemaRecoversWhenAStaleViewBlocksAColumnDrop(t *testing.T) {
 	if view.Type != core.CollectionTypeView {
 		t.Fatalf("tools_usage should be a view again, got %q", view.Type)
 	}
-	if !strings.Contains(view.ViewQuery, "transport") {
-		t.Fatalf("restored view should select transport, got %q", view.ViewQuery)
-	}
+	// The restored query must run against the columns the import just wrote.
 	if err := app.DB().NewQuery("SELECT * FROM tools_usage").All(&[]struct{}{}); err != nil {
 		t.Fatalf("restored view does not execute: %v", err)
 	}
