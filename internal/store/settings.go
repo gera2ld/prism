@@ -3,7 +3,7 @@ package store
 import (
 	"strings"
 
-	"github.com/pocketbase/pocketbase/core"
+	"ganigeorgiev.com/pocketbase/pocketbase/core"
 )
 
 // Single source of truth for gateway_settings. Everything else (Store cache,

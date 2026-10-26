@@ -11,8 +11,8 @@ import (
 	"sync"
 
 	conduitgo "github.com/gera2ld/conduit/packages/conduit-go"
-	"github.com/pocketbase/dbx"
-	"github.com/pocketbase/pocketbase/core"
+	"ganigeorgiev.com/pocketbase/dbx"
+	"ganigeorgiev.com/pocketbase/pocketbase/core"
 
 	"github.com/gera2ld/prism/internal/gateway"
 )

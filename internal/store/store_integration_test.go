@@ -9,9 +9,9 @@ import (
 	"time"
 
 	"github.com/gera2ld/prism/internal/gateway"
-	"github.com/pocketbase/dbx"
-	"github.com/pocketbase/pocketbase/core"
-	_ "github.com/pocketbase/pocketbase/migrations"
+	"ganigeorgiev.com/pocketbase/dbx"
+	"ganigeorgiev.com/pocketbase/pocketbase/core"
+	_ "ganigeorgiev.com/pocketbase/pocketbase/migrations"
 )
 
 var testStartedAt = time.Date(2026, time.September, 20, 12, 0, 0, 0, time.UTC)
