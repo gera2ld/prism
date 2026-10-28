@@ -46,6 +46,8 @@ func TestPrismAPISpec(t *testing.T) {
 		"/api/prism/routes/export":           {"get"},
 		"/api/prism/routes/import":           {"post"},
 		"/v1/chat/completions":               {"post"},
+		"/v1/messages":                       {"post"},
+		"/v1/messages/count_tokens":          {"post"},
 		"/v1/models":                         {"get"},
 		"/v1/images":                         {"post"},
 		"/v1/images/generations":             {"post"},
@@ -85,6 +87,9 @@ func TestPrismAPISpec(t *testing.T) {
 	raw := rec.Body.String()
 	if !strings.Contains(raw, "text/event-stream") {
 		t.Fatal("chat completions missing text/event-stream response")
+	}
+	if !strings.Contains(raw, "anthropic-version") || !strings.Contains(raw, "input_tokens") {
+		t.Fatal("anthropic messages docs missing")
 	}
 
 	// Docs UI is served from the shared public prefix.

@@ -36,6 +36,7 @@ func (s *Store) loadTransformers() ([]gateway.Transformer, error) {
 			r.GetString("name"),
 			r.GetString("provider"),
 			r.GetString("model_pattern"),
+			gateway.EndpointType(r.GetString("endpoint_type")),
 			r.GetFloat("priority"),
 			r.GetString("expression"),
 		)
@@ -70,7 +71,7 @@ func (s *Store) Transform(ctx context.Context, target gateway.Target, body []byt
 		return nil, "", err
 	}
 	for _, t := range list {
-		if t.Matches(target.ProviderID, target.Model) {
+		if t.Matches(target.ProviderID, target.Model, target.Endpoint) {
 			out, err := t.Apply(ctx, body)
 			if err != nil {
 				return nil, t.Name, err
@@ -88,6 +89,7 @@ func validateTransformer(e *core.RecordEvent) error {
 		e.Record.GetString("name"),
 		e.Record.GetString("provider"),
 		e.Record.GetString("model_pattern"),
+		gateway.EndpointType(e.Record.GetString("endpoint_type")),
 		e.Record.GetFloat("priority"),
 		e.Record.GetString("expression"),
 	)

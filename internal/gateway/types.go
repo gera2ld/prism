@@ -41,7 +41,20 @@ type Target struct {
 	BaseURL      string
 	APIKey       string
 	Model        string
+	// Endpoint is the route kind this target was resolved for. It lets
+	// endpoint-scoped transformers stay out of other surfaces.
+	Endpoint EndpointType
+	// AuthStyle overrides how the upstream credential is sent. Empty means
+	// auto: x-api-key for Anthropic routes, Bearer for everything else.
+	AuthStyle string
 }
+
+// Upstream credential styles. Anthropic speaks x-api-key; OpenAI-compatible
+// providers, including most Anthropic-compatible gateways, speak Bearer.
+const (
+	AuthStyleBearer  = "bearer"
+	AuthStyleXAPIKey = "x-api-key"
+)
 
 // EndpointType names one gateway surface an alias can serve. Routes carry
 // one, so a chat alias and an image alias never resolve to each other's
@@ -50,19 +63,33 @@ type Target struct {
 type EndpointType string
 
 const (
-	EndpointChat  EndpointType = "chat"
-	EndpointImage EndpointType = "image"
+	EndpointChat      EndpointType = "chat"
+	EndpointImage     EndpointType = "image"
+	EndpointAnthropic EndpointType = "anthropic"
 )
+
+// Valid reports whether e is a route kind the gateway can resolve.
+func (e EndpointType) Valid() bool {
+	switch e {
+	case EndpointChat, EndpointImage, EndpointAnthropic:
+		return true
+	}
+	return false
+}
 
 // ModelsValue reports the token advertised in GET /v1/models
 // supported_endpoint_types for this endpoint kind. The vocabulary follows
-// new-api (openai, image-generation, ...) so clients that already speak it
-// can route models without learning Prism-specific names.
+// new-api (openai, image-generation, anthropic, ...) so clients that already
+// speak it can route models without learning Prism-specific names.
 func (e EndpointType) ModelsValue() string {
-	if e == EndpointImage {
+	switch e {
+	case EndpointImage:
 		return "image-generation"
+	case EndpointAnthropic:
+		return "anthropic"
+	default:
+		return "openai"
 	}
-	return "openai"
 }
 
 type Config interface {
@@ -89,8 +116,10 @@ type Usage struct {
 	Cost *float64 `json:"cost"`
 }
 
-// UnmarshalJSON reads the standard token counts plus the nested OpenAI
-// prompt_tokens_details.cached_tokens field.
+// UnmarshalJSON reads OpenAI's token counts, the nested
+// prompt_tokens_details.cached_tokens field, and Anthropic's input/output
+// counts with their separate cache counters. Anthropic does not report a
+// total, so Finalize computes it from the parts.
 func (u *Usage) UnmarshalJSON(data []byte) error {
 	var raw struct {
 		PromptTokens     *int64   `json:"prompt_tokens"`
@@ -100,6 +129,10 @@ func (u *Usage) UnmarshalJSON(data []byte) error {
 		Details          *struct {
 			CachedTokens *int64 `json:"cached_tokens"`
 		} `json:"prompt_tokens_details"`
+		InputTokens              *int64 `json:"input_tokens"`
+		OutputTokens             *int64 `json:"output_tokens"`
+		CacheCreationInputTokens *int64 `json:"cache_creation_input_tokens"`
+		CacheReadInputTokens     *int64 `json:"cache_read_input_tokens"`
 	}
 	if err := json.Unmarshal(data, &raw); err != nil {
 		return err
@@ -108,10 +141,61 @@ func (u *Usage) UnmarshalJSON(data []byte) error {
 	u.CompletionTokens = raw.CompletionTokens
 	u.TotalTokens = raw.TotalTokens
 	u.Cost = raw.Cost
+	u.CachedTokens = nil
 	if raw.Details != nil {
 		u.CachedTokens = raw.Details.CachedTokens
 	}
+	// Anthropic bills input_tokens, cache creation and cache reads
+	// separately. Summing them matches OpenAI's prompt_tokens, which counts
+	// cached tokens as a subset of the prompt.
+	if u.PromptTokens == nil && raw.InputTokens != nil {
+		prompt := *raw.InputTokens
+		if raw.CacheCreationInputTokens != nil {
+			prompt += *raw.CacheCreationInputTokens
+		}
+		if raw.CacheReadInputTokens != nil {
+			prompt += *raw.CacheReadInputTokens
+		}
+		u.PromptTokens = &prompt
+	}
+	if u.CompletionTokens == nil && raw.OutputTokens != nil {
+		u.CompletionTokens = raw.OutputTokens
+	}
+	if u.CachedTokens == nil && raw.CacheReadInputTokens != nil {
+		u.CachedTokens = raw.CacheReadInputTokens
+	}
 	return nil
+}
+
+// Merge folds a partial usage report into u. Streaming providers report
+// usage in pieces: Anthropic puts input counts on message_start and output
+// counts on message_delta, so assigning the last report would lose the
+// input side. Nil fields never overwrite known values.
+func (u *Usage) Merge(other Usage) {
+	if other.PromptTokens != nil {
+		u.PromptTokens = other.PromptTokens
+	}
+	if other.CompletionTokens != nil {
+		u.CompletionTokens = other.CompletionTokens
+	}
+	if other.TotalTokens != nil {
+		u.TotalTokens = other.TotalTokens
+	}
+	if other.CachedTokens != nil {
+		u.CachedTokens = other.CachedTokens
+	}
+	if other.Cost != nil {
+		u.Cost = other.Cost
+	}
+}
+
+// Finalize fills the total when the provider reports only the parts. It is
+// idempotent, so logging every record through it is safe.
+func (u *Usage) Finalize() {
+	if u.TotalTokens == nil && u.PromptTokens != nil && u.CompletionTokens != nil {
+		total := *u.PromptTokens + *u.CompletionTokens
+		u.TotalTokens = &total
+	}
 }
 
 type Bodies struct {

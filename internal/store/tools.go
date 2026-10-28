@@ -10,9 +10,9 @@ import (
 	"strings"
 	"sync"
 
-	conduitgo "github.com/gera2ld/conduit/packages/conduit-go"
 	"ganigeorgiev.com/pocketbase/dbx"
 	"ganigeorgiev.com/pocketbase/pocketbase/core"
+	conduitgo "github.com/gera2ld/conduit/packages/conduit-go"
 
 	"github.com/gera2ld/prism/internal/gateway"
 )

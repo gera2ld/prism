@@ -10,7 +10,7 @@ import (
 
 func mustCompile(t *testing.T, pattern, expr string) gateway.Transformer {
 	t.Helper()
-	tr, err := gateway.CompileTransformer("t", "p1", pattern, 10, expr)
+	tr, err := gateway.CompileTransformer("t", "p1", pattern, "", 10, expr)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -18,10 +18,10 @@ func mustCompile(t *testing.T, pattern, expr string) gateway.Transformer {
 }
 
 func TestCompileTransformerRejectsBadInputs(t *testing.T) {
-	if _, err := gateway.CompileTransformer("t", "p1", "([bad", 0, `$`); err == nil {
+	if _, err := gateway.CompileTransformer("t", "p1", "([bad", "", 0, `$`); err == nil {
 		t.Fatal("expected pattern error")
 	}
-	if _, err := gateway.CompileTransformer("t", "p1", "^x$", 0, `{{{`); err == nil {
+	if _, err := gateway.CompileTransformer("t", "p1", "^x$", "", 0, `{{{`); err == nil {
 		t.Fatal("expected expression error")
 	}
 }
@@ -39,8 +39,28 @@ func TestTransformerMatches(t *testing.T) {
 		{"p2", "gpt-4", false},    // provider is exact
 	}
 	for _, c := range cases {
-		if got := tr.Matches(c.provider, c.model); got != c.want {
+		if got := tr.Matches(c.provider, c.model, gateway.EndpointChat); got != c.want {
 			t.Errorf("Matches(%q, %q) = %v, want %v", c.provider, c.model, got, c.want)
+		}
+	}
+}
+
+func TestTransformerMatchesEndpoint(t *testing.T) {
+	tr, err := gateway.CompileTransformer("t", "p1", `.*`, gateway.EndpointAnthropic, 0, `$`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !tr.Matches("p1", "claude", gateway.EndpointAnthropic) {
+		t.Fatal("expected match on its own endpoint")
+	}
+	if tr.Matches("p1", "claude", gateway.EndpointChat) {
+		t.Fatal("endpoint-scoped transformer matched chat")
+	}
+	// Empty endpoint keeps the old any-surface behavior.
+	any := mustCompile(t, `.*`, `$`)
+	for _, endpoint := range []gateway.EndpointType{gateway.EndpointChat, gateway.EndpointImage, gateway.EndpointAnthropic} {
+		if !any.Matches("p1", "m", endpoint) {
+			t.Fatalf("unscoped transformer did not match %s", endpoint)
 		}
 	}
 }
@@ -66,7 +86,7 @@ func TestTransformerApplyRejectsNonObject(t *testing.T) {
 }
 
 func TestTransformerApplyEvalError(t *testing.T) {
-	bad, err := gateway.CompileTransformer("t", "p1", `.*`, 0, `$unknownFunc(model)`)
+	bad, err := gateway.CompileTransformer("t", "p1", `.*`, "", 0, `$unknownFunc(model)`)
 	if err != nil {
 		t.Skip("expression rejected at compile time")
 	}

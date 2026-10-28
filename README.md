@@ -1,8 +1,9 @@
 # Prism
 
 One OpenAI-compatible endpoint in front of every model provider you use — with stable
-model names, per-key access control, and per-request usage history. Single binary,
-single SQLite file, web UI for configuration. Self-hosted, single operator.
+model names, per-key access control, and per-request usage history. Anthropic Messages
+pass-through is available on the same routing table. Single binary, single SQLite file,
+web UI for configuration. Self-hosted, single operator.
 
 Built on [PocketBase](https://pocketbase.io), which supplies the config store, admin
 UI, and log store.
@@ -47,7 +48,11 @@ Then open the admin UI at `http://localhost:8090/_/` and create an account on fi
 ## First setup
 
 1. **Add a provider** (`providers` collection): a `name` (e.g. `openai`), its `base_url`
-   (the root Prism appends `/chat/completions` to), the upstream API key, `enabled`.
+   (the root Prism appends `/chat/completions` or `/messages` to), the upstream API key,
+   `enabled`. For Anthropic, use the URL that ends in `/v1`, e.g.
+   `https://api.anthropic.com/v1`; Prism appends `/messages`. `auth_style` selects how the
+   upstream credential is sent (`bearer` or `x-api-key`); empty auto-selects `x-api-key`
+   for Anthropic routes and Bearer otherwise.
 2. **Add a route** (`routes` collection): an `alias` (what your clients will send as
    `model`), the provider, the `upstream_model` name the provider expects, and a
    `priority` (lower wins).
@@ -65,6 +70,39 @@ curl http://localhost:8090/v1/chat/completions \
 
 Streaming works as usual (`"stream": true`); `GET /v1/models` lists usable aliases in
 OpenAI's shape.
+
+## Anthropic Messages
+
+`POST /v1/messages` and `POST /v1/messages/count_tokens` pass through to an upstream that
+already speaks the Anthropic Messages API. Prism does not translate between OpenAI and
+Anthropic wire formats: only the `model` field is rewritten to the route's upstream model,
+and responses (JSON or SSE) are relayed byte-identical. Add a route with
+`endpoint_type: anthropic` and point the Anthropic SDK at Prism:
+
+```bash
+curl http://localhost:8090/v1/messages \
+  -H "x-api-key: sk-…" \
+  -H "anthropic-version: 2023-06-01" \
+  -H "Content-Type: application/json" \
+  -d '{"model": "<anthropic-alias>", "max_tokens": 256, "messages": [{"role": "user", "content": "hello"}]}'
+```
+
+Point the Anthropic SDK at Prism without a trailing `/v1`; the SDK appends `/v1/messages`
+itself:
+
+```bash
+export ANTHROPIC_BASE_URL=http://localhost:8090
+export ANTHROPIC_API_KEY=sk-…
+# or, to authenticate as a Bearer token:
+export ANTHROPIC_AUTH_TOKEN=sk-…
+```
+
+Client authentication accepts either `Authorization: Bearer sk-…` or `x-api-key: sk-…`.
+The client key is never forwarded upstream; the provider's own credential is sent in the
+style selected by `auth_style`. When the client omits `anthropic-version`, Prism adds
+`2023-06-01`. `GET /v1/models` answers in Anthropic's model-list shape, listing only
+aliases usable over Messages, when the request carries an `anthropic-version` header; it
+uses OpenAI's shape otherwise.
 
 Image generation is a second passthrough on the same routing table, in two shapes:
 `POST /v1/images/generations` takes OpenAI's shape (`model`, `prompt`, `size`, …) and
@@ -84,7 +122,8 @@ and provider-reported cost land in `request_logs` like chat, without TTFT.
 When body capture is on, inline base64 outputs are additionally decoded into `request_images`
 files (the captured response text keeps blanks instead of megabytes of base64) and expire
 with the same retention schedule. `GET /v1/models` advertises per-alias
-`supported_endpoint_types` in new-api's vocabulary (`openai`, `image-generation`).
+`supported_endpoint_types` in new-api's vocabulary (`openai`, `image-generation`,
+`anthropic`).
 
 Image edits take OpenAI's multipart shape on the same image routes:
 
@@ -165,10 +204,10 @@ Everything lives in the admin UI; edits apply without a restart.
 
 | Area | What it does |
 | --- | --- |
-| `providers` | Upstreams: name, base URL, token, on/off switch |
-| `routes` | Alias → provider + upstream model per endpoint kind (`endpoint_type`: `chat`/`image`), with priority |
+| `providers` | Upstreams: name, base URL, token, auth style, on/off switch |
+| `routes` | Alias → provider + upstream model per endpoint kind (`endpoint_type`: `chat`/`image`/`anthropic`), with priority |
 | `api_keys` | Client keys, on/off switch, optional RE2 allowlists (`alias_pattern`, `provider_pattern`, `model_pattern`; empty means unrestricted) |
-| `transformers` | JSONata reshaping per provider + model pattern, first match wins |
+| `transformers` | JSONata reshaping per provider + model pattern, optionally scoped to an `endpoint_type`; first match wins |
 | `gateway_settings` | Body-capture toggle, capture retention, cleanup schedule |
 | `request_logs` | Append-only usage history (tokens, cost, timing, finish reason, outcome) |
 | `request_bodies` | Captured request/response payload, auto-expiring |
@@ -176,7 +215,8 @@ Everything lives in the admin UI; edits apply without a restart.
 | `tools` | Your own tools, as conduit definitions, with an on/off switch |
 | `tool_logs` | Append-only tool invocation history (tool, transport, outcome, duration) |
 
-Out of scope by design: stateful APIs (chat completions only), multi-user/quota models,
-automatic cheapest-route selection, non-OpenAI provider dialects, running the agent's
-loop — Prism lists the tools a client may call and executes one on request, but it never
-decides to call them — and consuming other people's MCP servers.
+Out of scope by design: stateful APIs, multi-user/quota models, automatic cheapest-route
+selection, translating between wire formats (Anthropic Messages is pass-through only:
+the upstream must already speak it), running the agent's loop — Prism lists the tools a
+client may call and executes one on request, but it never decides to call them — and
+consuming other people's MCP servers.

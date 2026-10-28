@@ -1,7 +1,8 @@
 # Prism
 
 A single-binary, self-hosted proxy that puts one OpenAI-compatible endpoint in front of every
-model provider I use, and records what each request cost in tokens and time.
+model provider I use, with an Anthropic Messages pass-through on the same routing table, and
+records what each request cost in tokens and time.
 
 Built on PocketBase used as a Go library: it supplies the config store, the admin UI, and the
 log store, while the proxy itself is plain `net/http`.
@@ -21,14 +22,15 @@ log store, while the proxy itself is plain `net/http`.
 
 ## Non-goals
 
-- **Not the Responses API.** Stateful endpoints are out of scope. Chat Completions plus image generation only.
+- **Not the Responses API.** Stateful endpoints are out of scope. Chat Completions, image generation, and Anthropic Messages pass-through only.
 - **Not the agent loop.** Prism lists the tools a client may call and executes one on request; it
   does not decide to call them. The agent drives its own loop, which keeps the gateway a
   pass-through for chat and keeps this feature from becoming an agent runtime.
 - **Not a multi-tenant product.** Single operator, self-hosted. No org/team/quota model.
-- **Not a translation layer.** Upstreams must already speak OpenAI-compatible HTTP. Providers
-  with native-only APIs are handled by putting a compatible shim in front of them, not by
-  teaching the gateway their dialect.
+- **Not a translation layer.** Upstreams must already speak the surface they are configured for:
+  OpenAI-compatible HTTP, or Anthropic Messages for `anthropic` routes. The Anthropic surface is
+  pass-through only; Prism never converts between the two wire formats. Providers with
+  native-only APIs are handled by putting a compatible shim in front of them.
 - **Not a cost optimizer.** No automatic cheapest-route selection, no semantic caching.
 - **Not an MCP client.** Prism does not consume other people's MCP servers. Its tools are its
   own, defined in the database, so there is no third-party definition to review and approve. It
@@ -88,13 +90,15 @@ only safe to introduce once every existing value is one of its members.
 
 ### `providers`
 
-An upstream that speaks OpenAI-compatible HTTP.
+An upstream that speaks OpenAI-compatible HTTP, or Anthropic Messages for `anthropic`
+routes.
 
 | Field | Notes |
 | --- | --- |
 | `name` | Unique, human-facing (`openai`, `bedrock`, `local-vllm`) |
-| `base_url` | Root the gateway appends `/chat/completions` to |
+| `base_url` | Root the gateway appends `/chat/completions` or `/messages` to; for Anthropic it includes `/v1` |
 | `api_key` | Hidden from the API; encrypted at rest with a key from the environment |
+| `auth_style` | How the upstream credential is sent: `bearer` or `x-api-key`. Empty auto-selects `x-api-key` for Anthropic routes and Bearer otherwise |
 | `enabled` | Soft off-switch |
 
 ### `routes`
@@ -104,7 +108,7 @@ Maps an alias to a concrete model on a concrete provider, for one endpoint kind.
 | Field | Notes |
 | --- | --- |
 | `alias` | What clients send in `model` |
-| `endpoint_type` | `chat` or `image`, a select enum; a chat alias and an image alias never share targets even when named alike. Unset means chat |
+| `endpoint_type` | `chat`, `image`, or `anthropic`, a select enum; routes on different surfaces never share targets even when aliases are named alike. Unset means chat |
 | `provider` | Relation to `providers` |
 | `upstream_model` | The name the provider actually expects |
 | `priority` | Lower wins; ties broken arbitrarily |
@@ -118,7 +122,7 @@ it is not a conflict, it is a fallback chain.
 One row per request, written after the response completes or fails.
 
 Identity and routing: `api_key` (relation), `api_key_name` (API-key name snapshot), `alias`,
-`endpoint_type` (`chat` or `image`), `provider` (relation), `provider_name` (provider-name snapshot),
+`endpoint_type` (`chat`, `image`, or `anthropic`), `provider` (relation), `provider_name` (provider-name snapshot),
 `upstream_model`, `transformer` (name of the transformer that shaped
 the request, empty when none), `stream`. Request history is disposable pre-release data.
 Usage: `prompt_tokens`, `completion_tokens`, `total_tokens`, `cached_tokens` (prompt-cache
@@ -127,9 +131,10 @@ Timing: `started_at` (gateway-side request start, UTC; NULL on rows logged befor
 existed), `ttft_ms` (streaming only), `total_ms`. `created` is the row-write time, i.e. request end.
 Outcome: `status`, `outcome`, `error`, and `finish_reason`. `outcome` is one of `completed`,
 `client_disconnected`, `upstream_disconnected`, `upstream_error`, `gateway_error`, or `rejected`;
-`error` carries the detailed cause. `finish_reason` remains provider-produced, nullable, first
-choice only, and the last non-empty value wins on streams. A streamed response is completed
-only after its `[DONE]` event is successfully relayed.
+`error` carries the detailed cause. `finish_reason` remains provider-produced, nullable: the first
+choice's value for OpenAI shapes, the top-level `stop_reason` for Anthropic, and the last non-empty
+value wins on streams. A streamed response is completed only after its `[DONE]` or
+`message_stop` event is successfully relayed.
 
 ### `request_bodies`
 
@@ -175,7 +180,8 @@ alone yields no usable credentials.
 
 Request shaping per provider and model. `name` (unique), `provider` (relation, exact match),
 `model_pattern` (RE2 regexp on the upstream model name, unanchored: `^gpt-4` for prefix,
-`^model$` for exact), `priority` (lower wins, first match applies), `enabled`, `expression`
+`^model$` for exact), `endpoint_type` (optional `chat`, `image`, or `anthropic`; empty applies
+to every surface), `priority` (lower wins, first match applies), `enabled`, `expression`
 (JSONata producing the new request body object).
 
 ### `gateway_settings`
@@ -239,8 +245,8 @@ payload ages out under the retention cron, matching how `request_bodies` works.
 
 - **Shapes the upstream-bound request**, after the gateway's own mutation (model rewrite,
   `stream_options` injection) and before sending.
-- **First match wins** by priority, among enabled transformers whose provider matches exactly
-  and whose pattern matches the upstream model.
+- **First match wins** by priority, among enabled transformers whose provider matches exactly,
+  whose pattern matches the upstream model, and whose endpoint is empty or matches the surface.
 - **Fail-closed.** An eval error or non-object result rejects the request with a 500 and logs
   the cause; the upstream is never called. Bad expressions and patterns are rejected at save
   time, and each evaluation is bounded by a 5s timeout.
@@ -248,7 +254,7 @@ payload ages out under the retention cron, matching how `request_bodies` works.
   captured in `request_bodies` is the transformed body.
 
 This is request shaping (drop unsupported params, inject defaults, rename fields), not a
-translation layer: upstreams must still speak OpenAI-compatible HTTP.
+translation layer: upstreams must still speak the surface they are configured for.
 
 ### Tools
 
@@ -323,18 +329,21 @@ and a log sink, which is why it can be tested against in-process transports with
 ## Surface
 
 - `POST /v1/chat/completions` — streaming and non-streaming.
+- `POST /v1/messages` — Anthropic Messages pass-through, streaming and non-streaming.
+- `POST /v1/messages/count_tokens` — Anthropic token counting, relayed byte-identical.
 - `POST /v1/images/generations` — image generation in OpenAI's shape, non-streaming.
 - `POST /v1/images/edits` — image edits in OpenAI's multipart shape, non-streaming. Request transformers do not apply to multipart bodies.
 - `POST /v1/images` — image generation in OpenRouter's shape, non-streaming; kept for OpenRouter-backed providers.
-- `GET /v1/models` — the enabled aliases, in OpenAI's shape.
+- `GET /v1/models` — the enabled aliases, in OpenAI's shape, or Anthropic's model-list shape (Messages-capable aliases only) when the request carries `anthropic-version`.
 - `GET /v1/tools` — the tools this key may call, in OpenAI's tool shape so an agent can hand the
   array straight to a chat request.
 - `POST /v1/tools/{name}/invoke` — run one tool. A failed tool is still 200 with `is_error` true.
 - `POST /mcp` — the same tools over MCP, for agents that speak it.
 - `/_/` — PocketBase admin UI: configuration, approvals, and usage history as a queryable table.
 
-Authentication is a bearer token matched against `api_keys`. Key policy is model-scoped, so every
-valid key sees the same approved tool catalog.
+Authentication is a bearer token matched against `api_keys`; Anthropic surfaces also accept the
+same secret in `x-api-key`. Key policy is model-scoped, so every valid key sees the same approved
+tool catalog.
 
 Operational CLI commands are exposed directly as `key generate`, `key reveal`, `key list`,
 `provider list`, `provider reveal`, `route export`, `route import`, `tool list`, and
@@ -342,9 +351,9 @@ Operational CLI commands are exposed directly as `key generate`, `key reveal`, `
 `just` is reserved for build, test, and server conveniences. Every CLI command is
 also a superuser HTTP endpoint under `/api/prism/*` (same store methods, documented
 via huma OpenAPI at `/api/prism/docs`, which additionally documents the
-pass-through `POST /v1/chat/completions` (JSON and SSE), `GET /v1/models`,
-`GET /v1/tools`, and `POST /v1/tools/{name}/invoke`
-endpoints for client-key holders.
+pass-through `POST /v1/chat/completions` (JSON and SSE), `POST /v1/messages` and
+`POST /v1/messages/count_tokens`, `GET /v1/models`, `GET /v1/tools`, and
+`POST /v1/tools/{name}/invoke` endpoints for client-key holders.
 
 ## Open questions
 

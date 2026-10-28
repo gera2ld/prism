@@ -319,6 +319,21 @@
         "required": false,
         "system": false,
         "type": "bool"
+      },
+      {
+        "help": "How the upstream credential is sent. Empty auto-selects x-api-key for anthropic routes and Bearer otherwise.",
+        "hidden": false,
+        "id": "select1000000002",
+        "maxSelect": 1,
+        "name": "auth_style",
+        "presentable": false,
+        "required": false,
+        "system": false,
+        "type": "select",
+        "values": [
+          "bearer",
+          "x-api-key"
+        ]
       }
     ],
     "id": "pbc_2249077391",
@@ -822,7 +837,8 @@
         "type": "select",
         "values": [
           "chat",
-          "image"
+          "image",
+          "anthropic"
         ]
       },
       {
@@ -962,7 +978,8 @@
         "type": "select",
         "values": [
           "chat",
-          "image"
+          "image",
+          "anthropic"
         ]
       }
     ],
@@ -1353,6 +1370,22 @@
         "required": true,
         "system": false,
         "type": "text"
+      },
+      {
+        "help": "Surface this transformer applies to. Empty applies to every endpoint kind.",
+        "hidden": false,
+        "id": "select1000000003",
+        "maxSelect": 1,
+        "name": "endpoint_type",
+        "presentable": false,
+        "required": false,
+        "system": false,
+        "type": "select",
+        "values": [
+          "chat",
+          "image",
+          "anthropic"
+        ]
       },
       {
         "help": "",

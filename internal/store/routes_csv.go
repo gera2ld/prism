@@ -160,8 +160,8 @@ func (s *Store) ImportRoutesReader(r io.Reader, prune bool) error {
 			if endpoint == "" {
 				endpoint = string(gateway.EndpointChat)
 			}
-			if endpoint != string(gateway.EndpointChat) && endpoint != string(gateway.EndpointImage) {
-				return fmt.Errorf("CSV line %d has unknown endpoint_type %q: want chat or image", line, record[endpointCol])
+			if !gateway.EndpointType(endpoint).Valid() {
+				return fmt.Errorf("CSV line %d has unknown endpoint_type %q: want chat, image or anthropic", line, record[endpointCol])
 			}
 		}
 		priority, parseErr := strconv.Atoi(record[priorityCol])

@@ -24,9 +24,10 @@ import (
 )
 
 type providerConfig struct {
-	name    string
-	baseURL string
-	apiKey  string
+	name      string
+	baseURL   string
+	apiKey    string
+	authStyle string
 }
 
 type Store struct {
@@ -405,7 +406,7 @@ func (s *Store) Authenticate(ctx context.Context, presented string) (gateway.Key
 // kind. Every model must go through the routing table; unknown aliases, and
 // aliases with no route of the requested kind, are an error, no exceptions.
 func (s *Store) Resolve(ctx context.Context, endpoint gateway.EndpointType, alias string) ([]gateway.Target, error) {
-	if endpoint != gateway.EndpointChat && endpoint != gateway.EndpointImage {
+	if !endpoint.Valid() {
 		return nil, gateway.ErrUnknownModel
 	}
 	if err := s.loadRoutes(); err != nil {
@@ -565,7 +566,10 @@ func (s *Store) loadRoutes() error {
 		if decErr != nil {
 			return decErr
 		}
-		byID[p.Id] = providerConfig{name: name, baseURL: p.GetString("base_url"), apiKey: key}
+		byID[p.Id] = providerConfig{
+			name: name, baseURL: p.GetString("base_url"), apiKey: key,
+			authStyle: p.GetString("auth_style"),
+		}
 	}
 
 	routes, err := s.app.FindAllRecords("routes", dbx.HashExp{"enabled": true})
@@ -596,6 +600,8 @@ func (s *Store) loadRoutes() error {
 			BaseURL:      p.baseURL,
 			APIKey:       p.apiKey,
 			Model:        r.GetString("upstream_model"),
+			Endpoint:     gateway.EndpointType(endpoint),
+			AuthStyle:    p.authStyle,
 		})
 		if !seen[alias] {
 			seen[alias] = true

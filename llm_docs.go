@@ -96,14 +96,116 @@ var chatChunkSchema = objProp("One server-sent event payload (after the data: pr
 	"usage": usageSchema,
 })
 
-var modelsResponseSchema = objProp("Usable aliases for the presented key.", nil, map[string]*huma.Schema{
+var modelsResponseSchema = objProp("Usable aliases for the presented key. When the request carries an anthropic-version header, the response uses Anthropic's model-list shape instead.", nil, map[string]*huma.Schema{
 	"object": strProp("Always list."),
 	"data": {Type: "array", Description: "Aliases the key may use.", Items: objProp("A usable alias.", nil, map[string]*huma.Schema{
 		"object":                   strProp("Always model."),
 		"id":                       strProp("Alias."),
 		"owned_by":                 strProp("Provider that would serve the alias."),
-		"supported_endpoint_types": {Type: "array", Description: "Endpoint types this gateway exposes for the alias, in new-api's vocabulary: openai, image-generation, or both.", Items: &huma.Schema{Type: "string"}},
+		"supported_endpoint_types": {Type: "array", Description: "Endpoint types this gateway exposes for the alias, in new-api's vocabulary: openai, image-generation, anthropic.", Items: &huma.Schema{Type: "string"}},
 	})},
+})
+
+var anthropicUsageSchema = objProp("Anthropic token usage. input_tokens excludes cache reads, which are billed separately.", nil, map[string]*huma.Schema{
+	"input_tokens":                intProp("Uncached input tokens."),
+	"output_tokens":               intProp("Generated tokens."),
+	"cache_creation_input_tokens": intProp("Tokens written to the prompt cache."),
+	"cache_read_input_tokens":     intProp("Tokens served from the prompt cache."),
+})
+
+var anthropicContentBlockSchema = &huma.Schema{
+	Type:                 "object",
+	Description:          "A content block: text, image, tool_use or tool_result. Passed through untouched.",
+	AdditionalProperties: true,
+	Properties: map[string]*huma.Schema{
+		"type": strProp("Block type, e.g. text, tool_use."),
+		"text": strProp("Text content for text blocks."),
+		"id":   strProp("Tool-use ID for tool_use blocks."),
+		"name": strProp("Tool name for tool_use blocks."),
+	},
+}
+
+var anthropicMessageSchema = objProp("A conversation message. content may be a string or an array of content blocks.", []string{"role", "content"}, map[string]*huma.Schema{
+	"role":    strProp("user or assistant."),
+	"content": {Description: "String or array of content blocks, passed through untouched."},
+})
+
+var anthropicRequestSchema = &huma.Schema{
+	Type:        "object",
+	Description: "An Anthropic Messages request. Only model is read by the gateway; every other field passes through untouched. The model is rewritten to the upstream model before forwarding to {base_url}/messages. anthropic-version is added only when the client omits it.",
+	Required:    []string{"model", "max_tokens"},
+	Properties: map[string]*huma.Schema{
+		"model":          strProp("Prism alias as configured in the routing table, e.g. claude."),
+		"max_tokens":     intProp("Maximum generated tokens, passed through."),
+		"messages":       {Type: "array", Description: "Conversation history.", Items: anthropicMessageSchema},
+		"system":         {Description: "System prompt as a string or content blocks, passed through."},
+		"stream":         boolProp("Stream server-sent events instead of a single JSON body."),
+		"temperature":    {Type: "number", Description: "Sampling temperature, passed through."},
+		"top_p":          {Type: "number", Description: "Nucleus sampling cutoff, passed through."},
+		"top_k":          intProp("Top-k sampling cutoff, passed through."),
+		"stop_sequences": {Type: "array", Description: "Stop sequences, passed through.", Items: &huma.Schema{Type: "string"}},
+		"tools":          {Type: "array", Description: "Tool definitions, passed through.", Items: &huma.Schema{Type: "object", AdditionalProperties: true}},
+		"thinking":       {Type: "object", Description: "Extended-thinking configuration, passed through.", AdditionalProperties: true},
+		"metadata":       {Type: "object", Description: "Request metadata, passed through.", AdditionalProperties: true},
+	},
+	AdditionalProperties: true,
+}
+
+var anthropicCountTokensRequestSchema = &huma.Schema{
+	Type:        "object",
+	Description: "An Anthropic count_tokens request. Only model is read by the gateway; everything else passes through to {base_url}/messages/count_tokens.",
+	Required:    []string{"model", "messages"},
+	Properties: map[string]*huma.Schema{
+		"model":    strProp("Prism alias as configured in the routing table, e.g. claude."),
+		"messages": {Type: "array", Description: "Conversation history.", Items: anthropicMessageSchema},
+		"system":   {Description: "System prompt as a string or content blocks, passed through."},
+		"tools":    {Type: "array", Description: "Tool definitions, passed through.", Items: &huma.Schema{Type: "object", AdditionalProperties: true}},
+		"thinking": {Type: "object", Description: "Extended-thinking configuration, passed through.", AdditionalProperties: true},
+	},
+	AdditionalProperties: true,
+}
+
+var anthropicResponseSchema = objProp("An Anthropic Message, relayed byte-identical from the upstream.", nil, map[string]*huma.Schema{
+	"id":            strProp("Message ID."),
+	"type":          strProp("Always message."),
+	"role":          strProp("Always assistant."),
+	"model":         strProp("Upstream model name."),
+	"content":       {Type: "array", Description: "Generated content blocks.", Items: anthropicContentBlockSchema},
+	"stop_reason":   strProp("Why generation stopped, e.g. end_turn, max_tokens, tool_use."),
+	"stop_sequence": strProp("The matched stop sequence, when any."),
+	"usage":         anthropicUsageSchema,
+})
+
+var anthropicChunkSchema = objProp("One Anthropic server-sent event. Events are message_start, content_block_start, content_block_delta, content_block_stop, message_delta and message_stop, each with its own data payload, relayed byte-identical.", nil, map[string]*huma.Schema{
+	"type":    strProp("Event type, e.g. message_start, content_block_delta, message_stop."),
+	"index":   intProp("Content block index for block events."),
+	"message": {Type: "object", Description: "The message envelope on message_start.", AdditionalProperties: true},
+	"delta":   {Type: "object", Description: "Incremental content or stop reason.", AdditionalProperties: true},
+	"usage":   anthropicUsageSchema,
+})
+
+var anthropicCountTokensResponseSchema = objProp("Token count for the supplied request.", nil, map[string]*huma.Schema{
+	"input_tokens": intProp("Tokens the request would consume."),
+})
+
+var anthropicModelsResponseSchema = objProp("Aliases usable over Anthropic Messages, in Anthropic's model-list shape. Returned by GET /v1/models when the request carries anthropic-version.", nil, map[string]*huma.Schema{
+	"data": {Type: "array", Description: "Usable aliases.", Items: objProp("One model.", nil, map[string]*huma.Schema{
+		"type":         strProp("Always model."),
+		"id":           strProp("Alias."),
+		"display_name": strProp("Alias, as the stable human-readable name."),
+		"created_at":   strProp("RFC 3339 timestamp."),
+	})},
+	"has_more": boolProp("Always false: the full list is returned."),
+	"first_id": strProp("First alias in data."),
+	"last_id":  strProp("Last alias in data."),
+})
+
+var anthropicErrorSchema = objProp("Anthropic error envelope. Upstream errors are relayed in this same shape.", nil, map[string]*huma.Schema{
+	"type": strProp("Always error."),
+	"error": objProp("Error detail.", []string{"type", "message"}, map[string]*huma.Schema{
+		"type":    strProp("Error type, e.g. invalid_request_error, authentication_error, not_found_error, permission_error, api_error."),
+		"message": strProp("Human-readable message."),
+	}),
 })
 
 var imageRequestSchema = &huma.Schema{
@@ -228,6 +330,26 @@ func gatewayErrorResponses() map[string]*huma.Response {
 	}
 }
 
+// anthropicErrorResponses mirrors gatewayErrorResponses with Anthropic's
+// error envelope. Upstream error bodies already use this shape.
+func anthropicErrorResponses() map[string]*huma.Response {
+	err := func(desc string) *huma.Response {
+		return &huma.Response{
+			Description: desc,
+			Content: map[string]*huma.MediaType{
+				"application/json": {Schema: anthropicErrorSchema},
+			},
+		}
+	}
+	return map[string]*huma.Response{
+		"400": err("Malformed JSON body or body too large."),
+		"401": err("Missing or unknown client API key."),
+		"403": err("Key is not allowed to use the model."),
+		"404": err("No route for the model alias."),
+		"502": err("Upstream request failed."),
+	}
+}
+
 // registerLLMDocs documents the pass-through LLM endpoints in the shared
 // spec. It only writes documentation: traffic keeps flowing through the
 // proxy untouched, so there is no validation or behavior risk.
@@ -262,11 +384,62 @@ func registerLLMDocs(api huma.API) {
 			}(),
 		},
 	}
+	openAPI.Paths["/v1/messages"] = &huma.PathItem{
+		Post: &huma.Operation{
+			OperationID: "create-message",
+			Summary:     "Create a message (Anthropic shape)",
+			Description: "Anthropic Messages pass-through. The model field names a Prism alias backed by an anthropic route; requests are forwarded to {base_url}/messages and responses are relayed byte-identical, including SSE streams. Authenticate with either Authorization: Bearer or x-api-key.",
+			Tags:        []string{"llm"},
+			Security:    clientKeySecurity,
+			RequestBody: &huma.RequestBody{
+				Required: true,
+				Content: map[string]*huma.MediaType{
+					"application/json": {Schema: anthropicRequestSchema},
+				},
+			},
+			Responses: func() map[string]*huma.Response {
+				responses := anthropicErrorResponses()
+				responses["200"] = &huma.Response{
+					Description: "Message JSON, or Anthropic server-sent events when stream is true.",
+					Content: map[string]*huma.MediaType{
+						"application/json":  {Schema: anthropicResponseSchema},
+						"text/event-stream": {Schema: anthropicChunkSchema},
+					},
+				}
+				return responses
+			}(),
+		},
+	}
+	openAPI.Paths["/v1/messages/count_tokens"] = &huma.PathItem{
+		Post: &huma.Operation{
+			OperationID: "count-message-tokens",
+			Summary:     "Count message tokens (Anthropic shape)",
+			Description: "Anthropic count_tokens pass-through. The model field names a Prism alias backed by an anthropic route; the request is forwarded to {base_url}/messages/count_tokens and the response is relayed byte-identical. The call is logged without token usage.",
+			Tags:        []string{"llm"},
+			Security:    clientKeySecurity,
+			RequestBody: &huma.RequestBody{
+				Required: true,
+				Content: map[string]*huma.MediaType{
+					"application/json": {Schema: anthropicCountTokensRequestSchema},
+				},
+			},
+			Responses: func() map[string]*huma.Response {
+				responses := anthropicErrorResponses()
+				responses["200"] = &huma.Response{
+					Description: "Token count.",
+					Content: map[string]*huma.MediaType{
+						"application/json": {Schema: anthropicCountTokensResponseSchema},
+					},
+				}
+				return responses
+			}(),
+		},
+	}
 	openAPI.Paths["/v1/models"] = &huma.PathItem{
 		Get: &huma.Operation{
 			OperationID: "list-models",
 			Summary:     "List usable aliases",
-			Description: "Aliases the presented key may use, in OpenAI's list shape.",
+			Description: "Aliases the presented key may use. The default is OpenAI's list shape; when the request carries an anthropic-version header, the response uses Anthropic's model-list shape.",
 			Tags:        []string{"llm"},
 			Security:    clientKeySecurity,
 			Responses: func() map[string]*huma.Response {

@@ -15,9 +15,11 @@ import (
 )
 
 const (
-	maxBodyCapture = 256 << 10
-	modelsPath     = "/v1/models"
-	chatPath       = "/v1/chat/completions"
+	maxBodyCapture  = 256 << 10
+	modelsPath      = "/v1/models"
+	chatPath        = "/v1/chat/completions"
+	messagesPath    = "/v1/messages"
+	countTokensPath = "/v1/messages/count_tokens"
 )
 
 type Proxy struct {
@@ -49,6 +51,10 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		p.handleModels(w, r)
 	case r.URL.Path == chatPath && r.Method == http.MethodPost:
 		p.handleChat(w, r)
+	case r.URL.Path == messagesPath && r.Method == http.MethodPost:
+		p.handleMessages(w, r)
+	case r.URL.Path == countTokensPath && r.Method == http.MethodPost:
+		p.handleCountTokens(w, r)
 	case r.URL.Path == imagesPath && r.Method == http.MethodPost:
 		p.handleImages(w, r)
 	case r.URL.Path == generationsPath && r.Method == http.MethodPost:
@@ -64,13 +70,22 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 }
 
 func (p *Proxy) handleModels(w http.ResponseWriter, r *http.Request) {
+	anthropicClient := r.Header.Get("anthropic-version") != ""
 	presented, err := p.auth(r)
 	if err != nil {
+		if anthropicClient {
+			writeAnthropicAuthError(w, err)
+			return
+		}
 		writeAuthError(w, err)
 		return
 	}
 	names, err := p.Config.Models(r.Context())
 	if err != nil {
+		if anthropicClient {
+			writeAnthropicError(w, http.StatusInternalServerError, "api_error", "failed to load routes")
+			return
+		}
 		writeError(w, http.StatusInternalServerError, "config_error", "failed to load routes")
 		return
 	}
@@ -83,7 +98,7 @@ func (p *Proxy) handleModels(w http.ResponseWriter, r *http.Request) {
 	for _, name := range names {
 		var endpointTypes []string
 		owner := ""
-		for _, endpoint := range []EndpointType{EndpointChat, EndpointImage} {
+		for _, endpoint := range []EndpointType{EndpointChat, EndpointImage, EndpointAnthropic} {
 			targets, err := p.Config.Resolve(r.Context(), endpoint, name)
 			if err != nil {
 				continue
@@ -104,23 +119,90 @@ func (p *Proxy) handleModels(w http.ResponseWriter, r *http.Request) {
 		}
 		data = append(data, modelObject{Object: "model", ID: name, OwnedBy: owner, SupportedEndpointTypes: endpointTypes})
 	}
+	// Anthropic SDKs send anthropic-version on every request, including
+	// model listing, and expect their own envelope. OpenAI clients do not,
+	// so the same path serves both shapes without a separate route.
+	if anthropicClient {
+		writeJSON(w, http.StatusOK, anthropicModelsResponseFrom(data, p.Now()))
+		return
+	}
 	writeJSON(w, http.StatusOK, modelsResponse{Object: "list", Data: data})
 }
+
+type anthropicModelObject struct {
+	Type        string `json:"type"`
+	ID          string `json:"id"`
+	DisplayName string `json:"display_name"`
+	CreatedAt   string `json:"created_at"`
+}
+
+type anthropicModelsResponse struct {
+	Data    []anthropicModelObject `json:"data"`
+	HasMore bool                   `json:"has_more"`
+	FirstID *string                `json:"first_id"`
+	LastID  *string                `json:"last_id"`
+}
+
+// anthropicModelsResponseFrom projects Prism aliases into Anthropic's model
+// list shape. Aliases are stable names, so the alias is both the id and the
+// display name; there is no upstream model to leak.
+func anthropicModelsResponseFrom(data []modelObject, now time.Time) anthropicModelsResponse {
+	createdAt := now.UTC().Format(time.RFC3339)
+	anthropicKind := EndpointAnthropic.ModelsValue()
+	models := make([]anthropicModelObject, 0, len(data))
+	for _, model := range data {
+		// Anthropic's shape has no supported_endpoint_types field, so list
+		// only aliases the key may actually use over Messages.
+		supported := false
+		for _, kind := range model.SupportedEndpointTypes {
+			if kind == anthropicKind {
+				supported = true
+				break
+			}
+		}
+		if !supported {
+			continue
+		}
+		models = append(models, anthropicModelObject{
+			Type: "model", ID: model.ID, DisplayName: model.ID, CreatedAt: createdAt,
+		})
+	}
+	var first, last *string
+	if len(models) > 0 {
+		first = &models[0].ID
+		last = &models[len(models)-1].ID
+	}
+	return anthropicModelsResponse{Data: models, HasMore: false, FirstID: first, LastID: last}
+}
+
+// errorWriter renders a gateway-level error in the surface's envelope.
+type errorWriter func(http.ResponseWriter, int, string, string)
 
 // deny rejects a request no route target of which the key may use. The denial
 // is logged with the top route's provider/model so the operator can see
 // exactly what was blocked.
 func (p *Proxy) deny(w http.ResponseWriter, start time.Time, presented Key, endpoint EndpointType, alias string, raw []byte, blocked Target) {
+	p.denyWith(w, start, presented, endpoint, alias, raw, blocked, writeError, "forbidden")
+}
+
+// denyAnthropic is deny with Anthropic's error envelope and error vocabulary,
+// for the messages surface.
+func (p *Proxy) denyAnthropic(w http.ResponseWriter, start time.Time, presented Key, endpoint EndpointType, alias string, raw []byte, blocked Target) {
+	p.denyWith(w, start, presented, endpoint, alias, raw, blocked, writeAnthropicError, "permission_error")
+}
+
+func (p *Proxy) denyWith(w http.ResponseWriter, start time.Time, presented Key, endpoint EndpointType, alias string, raw []byte, blocked Target, writeErr errorWriter, errType string) {
+	message := fmt.Sprintf("key %q is not allowed to use model %q", presented.Name, alias)
 	rec := Record{
 		StartedAt: start, KeyID: presented.ID, KeyName: presented.Name, Alias: alias, Endpoint: endpoint,
 		ProviderID: blocked.ProviderID, ProviderName: blocked.ProviderName, UpstreamModel: blocked.Model,
 		TotalMS: p.Now().Sub(start).Milliseconds(), Status: http.StatusForbidden,
 		Outcome: OutcomeRejected,
-		Error:   fmt.Sprintf("key %q is not allowed to use model %q", presented.Name, alias),
+		Error:   message,
 		Bodies:  p.captureBody(p.Capture(), string(raw), ""),
 	}
 	p.write(rec)
-	writeError(w, http.StatusForbidden, "forbidden", fmt.Sprintf("key %q is not allowed to use model %q", presented.Name, alias))
+	writeErr(w, http.StatusForbidden, errType, message)
 }
 
 // writeAuthError maps authentication failures: unknown keys are 401, keys
@@ -168,9 +250,13 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 }
 
 func (p *Proxy) auth(r *http.Request) (Key, error) {
-	header := r.Header.Get("Authorization")
-	token, ok := strings.CutPrefix(header, "Bearer ")
+	token, ok := strings.CutPrefix(r.Header.Get("Authorization"), "Bearer ")
 	if !ok || token == "" {
+		// Anthropic clients send x-api-key rather than a Bearer token.
+		// Accept both so one key works on every surface.
+		token = r.Header.Get("x-api-key")
+	}
+	if token == "" {
 		return Key{}, ErrUnauthorized
 	}
 	return p.Config.Authenticate(r.Context(), token)
@@ -381,17 +467,44 @@ func (s *sseParser) parseLine(line []byte, rec *Record) {
 		return
 	}
 	var parsed struct {
+		Type    string `json:"type"`
 		Usage   *Usage `json:"usage"`
+		Message *struct {
+			Usage *Usage `json:"usage"`
+		} `json:"message"`
+		Delta *struct {
+			StopReason *string `json:"stop_reason"`
+		} `json:"delta"`
 		Choices []struct {
 			FinishReason *string `json:"finish_reason"`
 		} `json:"choices"`
-		Error *providerError `json:"error"`
+		StopReason *string        `json:"stop_reason"`
+		Error      *providerError `json:"error"`
 	}
 	if err := json.Unmarshal(payload, &parsed); err != nil {
 		return
 	}
+	// Anthropic terminates with message_stop; OpenAI with [DONE]. Accept
+	// either so compatible upstreams can append whichever they prefer.
+	if parsed.Type == "message_stop" {
+		s.done = true
+		return
+	}
+	// Anthropic splits usage across events: input and cache counts arrive
+	// nested under message_start, output counts in message_delta. Merge
+	// rather than replace so the later event cannot erase the earlier one.
+	if parsed.Message != nil && parsed.Message.Usage != nil {
+		rec.Usage.Merge(*parsed.Message.Usage)
+	}
 	if parsed.Usage != nil {
-		rec.Usage = *parsed.Usage
+		rec.Usage.Merge(*parsed.Usage)
+	}
+	if parsed.Delta != nil && parsed.Delta.StopReason != nil && *parsed.Delta.StopReason != "" {
+		reason := *parsed.Delta.StopReason
+		rec.FinishReason = &reason
+	}
+	if parsed.StopReason != nil && *parsed.StopReason != "" {
+		rec.FinishReason = parsed.StopReason
 	}
 	if len(parsed.Choices) > 0 {
 		if fr := parsed.Choices[0].FinishReason; fr != nil && *fr != "" {
@@ -499,7 +612,7 @@ func (p *Proxy) relayStream(ctx context.Context, w http.ResponseWriter, upstream
 				break
 			}
 			rec.Outcome = OutcomeUpstreamDisconnected
-			rec.Error = "stream ended before [DONE]"
+			rec.Error = "stream ended before [DONE] or message_stop"
 			break
 		}
 	}
@@ -513,11 +626,15 @@ func (p *Proxy) relayOnce(ctx context.Context, w http.ResponseWriter, upstream *
 	body, readErr := io.ReadAll(io.LimitReader(upstream.Body, 32<<20))
 	completion := chatCompletion{}
 	if err := json.Unmarshal(body, &completion); err == nil {
-		rec.Usage = completion.Usage
+		rec.Usage.Merge(completion.Usage)
 		if len(completion.Choices) > 0 {
 			if fr := completion.Choices[0].FinishReason; fr != nil && *fr != "" {
 				rec.FinishReason = fr
 			}
+		} else if completion.StopReason != nil && *completion.StopReason != "" {
+			// Anthropic reports stop_reason at the top level and has no
+			// choices array.
+			rec.FinishReason = completion.StopReason
 		}
 		if completion.Error != nil {
 			rec.Outcome = OutcomeUpstreamError
@@ -581,7 +698,10 @@ type chatCompletion struct {
 	Choices []struct {
 		FinishReason *string `json:"finish_reason"`
 	} `json:"choices"`
-	Error *providerError `json:"error"`
+	// Anthropic's non-streaming message shape: top-level stop_reason and no
+	// choices array.
+	StopReason *string        `json:"stop_reason"`
+	Error      *providerError `json:"error"`
 }
 
 // rewriteChatBody applies the gateway's own mutation: the upstream model
@@ -606,22 +726,58 @@ func transformCaptureError(name string, err error) string {
 }
 
 func newUpstreamRequest(r *http.Request, raw []byte, target Target) (*http.Request, error) {
-	url := strings.TrimSuffix(target.BaseURL, "/") + "/chat/completions"
+	return newUpstreamJSONRequest(r, raw, target, "/chat/completions")
+}
+
+// newUpstreamJSONRequest builds a JSON POST to one upstream surface. It
+// preserves the client query string (Anthropic betas use ?beta=true), strips
+// client credentials so the Prism key cannot leak, and applies the provider
+// credential in the style the upstream expects.
+func newUpstreamJSONRequest(r *http.Request, raw []byte, target Target, suffix string) (*http.Request, error) {
+	url := strings.TrimSuffix(target.BaseURL, "/") + suffix
+	if r.URL.RawQuery != "" {
+		url += "?" + r.URL.RawQuery
+	}
 	upstream, err := http.NewRequestWithContext(r.Context(), http.MethodPost, url, bytes.NewReader(raw))
 	if err != nil {
 		return nil, err
 	}
 	upstream.Header = http.Header{}
 	for key, values := range r.Header {
-		if !hopByHop(key) && !strings.EqualFold(key, "Authorization") && !strings.EqualFold(key, "Host") {
+		if !hopByHop(key) && !isCredentialHeader(key) && !strings.EqualFold(key, "Host") {
 			upstream.Header[key] = values
 		}
 	}
-	if target.APIKey != "" {
-		upstream.Header.Set("Authorization", "Bearer "+target.APIKey)
-	}
+	setUpstreamAuth(upstream.Header, target)
 	upstream.Host = upstream.URL.Host
 	return upstream, nil
+}
+
+func isCredentialHeader(key string) bool {
+	return strings.EqualFold(key, "Authorization") || strings.EqualFold(key, "x-api-key")
+}
+
+// setUpstreamAuth sends the provider credential. An empty style is inferred
+// from the surface: Anthropic's own API wants x-api-key, OpenAI-compatible
+// providers want Bearer. Compatible gateways that use Bearer with an
+// Anthropic surface override this with providers.auth_style.
+func setUpstreamAuth(header http.Header, target Target) {
+	if target.APIKey == "" {
+		return
+	}
+	style := target.AuthStyle
+	if style == "" {
+		if target.Endpoint == EndpointAnthropic {
+			style = AuthStyleXAPIKey
+		} else {
+			style = AuthStyleBearer
+		}
+	}
+	if style == AuthStyleXAPIKey {
+		header.Set("x-api-key", target.APIKey)
+		return
+	}
+	header.Set("Authorization", "Bearer "+target.APIKey)
 }
 
 func hopByHop(key string) bool {
@@ -667,6 +823,9 @@ func (p *Proxy) captureBody(enabled bool, request, response string) *Bodies {
 }
 
 func (p *Proxy) write(rec Record) {
+	// Providers that report only parts (Anthropic) get a computed total;
+	// providers that report it (OpenAI) keep theirs.
+	rec.Usage.Finalize()
 	if p.Logs == nil {
 		return
 	}

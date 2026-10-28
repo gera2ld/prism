@@ -8,10 +8,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/gera2ld/prism/internal/gateway"
 	"ganigeorgiev.com/pocketbase/dbx"
 	"ganigeorgiev.com/pocketbase/pocketbase/core"
 	_ "ganigeorgiev.com/pocketbase/pocketbase/migrations"
+	"github.com/gera2ld/prism/internal/gateway"
 )
 
 var testStartedAt = time.Date(2026, time.September, 20, 12, 0, 0, 0, time.UTC)
@@ -603,7 +603,7 @@ func TestSeedSettingsRow(t *testing.T) {
 	}
 }
 
-func seedTransformer(t *testing.T, app *core.BaseApp, name, providerID, pattern string, priority int, expression string, enabled bool) {
+func seedTransformer(t *testing.T, app *core.BaseApp, name, providerID, pattern, endpoint string, priority int, expression string, enabled bool) {
 	t.Helper()
 	collection, err := app.FindCollectionByNameOrId("transformers")
 	if err != nil {
@@ -613,6 +613,9 @@ func seedTransformer(t *testing.T, app *core.BaseApp, name, providerID, pattern 
 	r.Set("name", name)
 	r.Set("provider", providerID)
 	r.Set("model_pattern", pattern)
+	if endpoint != "" {
+		r.Set("endpoint_type", endpoint)
+	}
 	r.Set("priority", priority)
 	r.Set("expression", expression)
 	r.Set("enabled", enabled)
@@ -643,10 +646,10 @@ func TestTransformersEndToEnd(t *testing.T) {
 	target := gateway.Target{ProviderID: providerID, BaseURL: "http://127.0.0.1:9911", Model: "gpt-x"}
 	body := []byte(`{"model":"gpt-x","messages":[]}`)
 
-	seedTransformer(t, app, "broad", providerID, `gpt-`, 20, `{"shaped": "broad"}`, true)
-	seedTransformer(t, app, "exact", providerID, `^gpt-x$`, 10, `{"shaped": "exact"}`, true)
-	seedTransformer(t, app, "other-provider", prov2.Id, `.*`, 0, `{"shaped": "wrong"}`, true)
-	seedTransformer(t, app, "disabled", providerID, `.*`, 0, `{"shaped": "wrong"}`, false)
+	seedTransformer(t, app, "broad", providerID, `gpt-`, "", 20, `{"shaped": "broad"}`, true)
+	seedTransformer(t, app, "exact", providerID, `^gpt-x$`, "", 10, `{"shaped": "exact"}`, true)
+	seedTransformer(t, app, "other-provider", prov2.Id, `.*`, "", 0, `{"shaped": "wrong"}`, true)
+	seedTransformer(t, app, "disabled", providerID, `.*`, "", 0, `{"shaped": "wrong"}`, false)
 
 	// First match by priority wins.
 	out, name, err := s.Transform(context.Background(), target, body)
@@ -657,6 +660,27 @@ func TestTransformersEndToEnd(t *testing.T) {
 		t.Fatalf("got name=%q out=%s", name, out)
 	}
 
+	// An endpoint-scoped transformer only applies on its own surface, even
+	// when it has the highest priority.
+	seedTransformer(t, app, "anthropic-only", providerID, `.*`, "anthropic", 1, `{"shaped": "anthropic"}`, true)
+	anthropicTarget := target
+	anthropicTarget.Endpoint = gateway.EndpointAnthropic
+	out, name, err = s.Transform(context.Background(), anthropicTarget, body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if name != "anthropic-only" || string(out) != `{"shaped":"anthropic"}` {
+		t.Fatalf("anthropic got name=%q out=%s", name, out)
+	}
+	target.Endpoint = gateway.EndpointChat
+	out, name, err = s.Transform(context.Background(), target, body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if name != "exact" || string(out) != `{"shaped":"exact"}` {
+		t.Fatalf("chat got name=%q out=%s", name, out)
+	}
+
 	// No match passes the body through untouched.
 	out, name, err = s.Transform(context.Background(), gateway.Target{ProviderID: providerID, Model: "o1"}, body)
 	if err != nil || name != "" || string(out) != string(body) {
@@ -664,7 +688,7 @@ func TestTransformersEndToEnd(t *testing.T) {
 	}
 
 	// New rows are picked up without restart (hook invalidation).
-	seedTransformer(t, app, "new-winner", providerID, `^gpt-x$`, 5, `{"shaped": "new"}`, true)
+	seedTransformer(t, app, "new-winner", providerID, `^gpt-x$`, "", 5, `{"shaped": "new"}`, true)
 	if out, name, err = s.Transform(context.Background(), target, body); err != nil || name != "new-winner" {
 		t.Fatalf("got name=%q out=%s err=%v", name, out, err)
 	}
@@ -1173,6 +1197,46 @@ func TestRouteEndpointsIsolateChatAndImage(t *testing.T) {
 	}
 }
 
+func TestAnthropicRouteResolution(t *testing.T) {
+	app := newTestApp(t)
+	s, err := Open(app, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	providerID := seedConfig(t, app, s)
+
+	provider, err := app.FindRecordById("providers", providerID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	provider.Set("auth_style", "bearer")
+	if err := app.Save(provider); err != nil {
+		t.Fatal(err)
+	}
+	seedRoute(t, app, "claude", providerID, "claude-sonnet", "anthropic")
+
+	targets, err := s.Resolve(context.Background(), gateway.EndpointAnthropic, "claude")
+	if err != nil || len(targets) != 1 {
+		t.Fatalf("anthropic targets = %+v, err = %v", targets, err)
+	}
+	target := targets[0]
+	if target.Model != "claude-sonnet" || target.Endpoint != gateway.EndpointAnthropic {
+		t.Fatalf("unexpected target %+v", target)
+	}
+	if target.AuthStyle != gateway.AuthStyleBearer {
+		t.Fatalf("auth style = %q, want bearer", target.AuthStyle)
+	}
+
+	// Anthropic routes do not leak into chat, and chat routes do not leak
+	// into Anthropic.
+	if _, err := s.Resolve(context.Background(), gateway.EndpointChat, "claude"); err == nil {
+		t.Fatal("anthropic alias resolved as chat")
+	}
+	if _, err := s.Resolve(context.Background(), gateway.EndpointAnthropic, "alias"); err == nil {
+		t.Fatal("chat alias resolved as anthropic")
+	}
+}
+
 func TestRouteEndpointDefaultsAndValidation(t *testing.T) {
 	app := newTestApp(t)
 	s, err := Open(app, nil)
@@ -1231,7 +1295,7 @@ func TestRouteEndpointIsAnEnum(t *testing.T) {
 		if selectField.MaxSelect != 1 {
 			t.Fatalf("%s.endpoint_type allows %d values, want a single kind", name, selectField.MaxSelect)
 		}
-		want := []string{"chat", "image"}
+		want := []string{"chat", "image", "anthropic"}
 		if !slices.Equal(selectField.Values, want) {
 			t.Fatalf("%s.endpoint_type values = %v, want %v", name, selectField.Values, want)
 		}
@@ -1275,6 +1339,7 @@ func TestRoutesUsageSplitsByEndpoint(t *testing.T) {
 	}
 	providerID := seedConfig(t, app, s)
 	seedRoute(t, app, "alias", providerID, "img-x", "image")
+	seedRoute(t, app, "alias", providerID, "claude-x", "anthropic")
 	secret, err := s.CreateAPIKey(app, "split-endpoint")
 	if err != nil {
 		t.Fatal(err)
@@ -1293,6 +1358,12 @@ func TestRoutesUsageSplitsByEndpoint(t *testing.T) {
 	if err := sink.Write(context.Background(), rec); err != nil {
 		t.Fatal(err)
 	}
+	rec.Endpoint = gateway.EndpointAnthropic
+	rec.UpstreamModel = "claude-x"
+	rec.StartedAt = testStartedAt.Add(time.Second)
+	if err := sink.Write(context.Background(), rec); err != nil {
+		t.Fatal(err)
+	}
 
 	rows, err := app.FindAllRecords("routes_usage")
 	if err != nil {
@@ -1308,8 +1379,37 @@ func TestRoutesUsageSplitsByEndpoint(t *testing.T) {
 	if counts["image"] != [2]int{1, 0} {
 		t.Fatalf("image row counts = %v, want one success", counts)
 	}
+	if counts["anthropic"] != [2]int{1, 0} {
+		t.Fatalf("anthropic row counts = %v, want one success", counts)
+	}
 	if counts["chat"] != [2]int{0, 0} {
 		t.Fatalf("chat row counts = %v, want zeros", counts)
+	}
+}
+
+func TestRoutesCSVImportsAnthropic(t *testing.T) {
+	app := newTestApp(t)
+	s, err := Open(app, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	seedConfig(t, app, s)
+
+	csv := "alias,provider,upstream_model,endpoint_type,priority,enabled\nclaude,prov,claude-sonnet,anthropic,0,true\n"
+	if err := s.ImportRoutesReader(strings.NewReader(csv), false); err != nil {
+		t.Fatalf("anthropic import: %v", err)
+	}
+	targets, err := s.Resolve(context.Background(), gateway.EndpointAnthropic, "claude")
+	if err != nil || len(targets) != 1 || targets[0].Model != "claude-sonnet" {
+		t.Fatalf("anthropic targets = %+v, err = %v", targets, err)
+	}
+
+	exported, err := s.ExportRoutesCSV()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(exported), "claude,prov,claude-sonnet,anthropic") {
+		t.Fatalf("export lost the anthropic kind:\n%s", exported)
 	}
 }
 

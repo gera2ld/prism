@@ -23,6 +23,7 @@ type fakeConfig struct {
 	key       gateway.Key
 	targets   []gateway.Target
 	image     []gateway.Target
+	anthropic []gateway.Target
 	models    []string
 	named     map[string]map[gateway.EndpointType][]gateway.Target
 	transform func([]byte) ([]byte, string, error)
@@ -47,11 +48,17 @@ func (f *fakeConfig) Resolve(_ context.Context, endpoint gateway.EndpointType, a
 		}
 		return targets, nil
 	}
-	if endpoint == gateway.EndpointImage {
+	switch endpoint {
+	case gateway.EndpointImage:
 		if len(f.image) == 0 {
 			return nil, gateway.ErrUnknownModel
 		}
 		return f.image, nil
+	case gateway.EndpointAnthropic:
+		if len(f.anthropic) == 0 {
+			return nil, gateway.ErrUnknownModel
+		}
+		return f.anthropic, nil
 	}
 	if len(f.targets) == 0 {
 		return nil, gateway.ErrUnknownModel
@@ -63,7 +70,7 @@ func (f *fakeConfig) Models(_ context.Context) ([]string, error) {
 	if f.models != nil {
 		return f.models, nil
 	}
-	if len(f.targets) > 0 || len(f.image) > 0 {
+	if len(f.targets) > 0 || len(f.image) > 0 || len(f.anthropic) > 0 {
 		return []string{"alias"}, nil
 	}
 	return nil, nil
@@ -1705,5 +1712,416 @@ func TestProxyImageEditsNoFilesWithoutCapture(t *testing.T) {
 	got := sink.records[0]
 	if len(got.Images) != 0 || got.Bodies != nil {
 		t.Fatalf("capture off must store neither files nor bodies, got %+v", got)
+	}
+}
+
+func TestProxyAnthropicMessagesPassthrough(t *testing.T) {
+	const response = `{"id":"msg_1","type":"message","role":"assistant","content":[{"type":"text","text":"hi"}],"model":"claude-upstream","stop_reason":"end_turn","stop_sequence":null,"usage":{"input_tokens":10,"cache_creation_input_tokens":2,"cache_read_input_tokens":3,"output_tokens":5}}`
+
+	var seenPath, seenQuery, seenVersion, seenKey, seenAuth string
+	var seenBody map[string]any
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		seenPath = r.URL.Path
+		seenQuery = r.URL.RawQuery
+		seenVersion = r.Header.Get("anthropic-version")
+		seenKey = r.Header.Get("x-api-key")
+		seenAuth = r.Header.Get("Authorization")
+		body, _ := io.ReadAll(r.Body)
+		_ = json.Unmarshal(body, &seenBody)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, response)
+	}))
+	defer upstream.Close()
+
+	sink := &sliceSink{}
+	proxy := gateway.New(&fakeConfig{
+		token:     "client-key",
+		anthropic: []gateway.Target{{ProviderID: "p1", ProviderName: "prov", BaseURL: upstream.URL + "/v1", APIKey: "upstream-secret", Model: "claude-upstream", Endpoint: gateway.EndpointAnthropic}},
+	}, sink, nil)
+
+	body := `{"model":"alias","max_tokens":64,"system":"be brief","messages":[{"role":"user","content":"hello"}],"thinking":{"type":"enabled","budget_tokens":32}}`
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/v1/messages?beta=true", strings.NewReader(body))
+	req.Header.Set("Authorization", "Bearer client-key")
+	proxy.ServeHTTP(rec, req)
+
+	if rec.Code != 200 {
+		t.Fatalf("status = %d, body %s", rec.Code, rec.Body.String())
+	}
+	if rec.Body.String() != response {
+		t.Fatalf("response was rewritten:\n%s", rec.Body.String())
+	}
+	if seenPath != "/v1/messages" || seenQuery != "beta=true" {
+		t.Fatalf("upstream path = %q query = %q", seenPath, seenQuery)
+	}
+	if seenVersion != "2023-06-01" {
+		t.Fatalf("anthropic-version = %q, want default", seenVersion)
+	}
+	// The default for Anthropic routes is x-api-key, and the client key
+	// never reaches the upstream.
+	if seenKey != "upstream-secret" || seenAuth != "" {
+		t.Fatalf("upstream credentials = x-api-key %q, authorization %q", seenKey, seenAuth)
+	}
+	if seenBody["model"] != "claude-upstream" {
+		t.Fatalf("model not rewritten: %v", seenBody["model"])
+	}
+	if _, ok := seenBody["stream_options"]; ok {
+		t.Fatal("messages request must not gain stream_options")
+	}
+	if seenBody["system"] != "be brief" {
+		t.Fatalf("system was not passed through: %v", seenBody["system"])
+	}
+	if _, ok := seenBody["thinking"]; !ok {
+		t.Fatal("thinking was not passed through")
+	}
+
+	if len(sink.records) != 1 {
+		t.Fatalf("records = %d", len(sink.records))
+	}
+	got := sink.records[0]
+	if got.Endpoint != gateway.EndpointAnthropic || got.Alias != "alias" || got.UpstreamModel != "claude-upstream" {
+		t.Fatalf("unexpected record %+v", got)
+	}
+	if got.Usage.PromptTokens == nil || *got.Usage.PromptTokens != 15 {
+		t.Fatalf("prompt tokens = %+v, want 15", got.Usage.PromptTokens)
+	}
+	if got.Usage.CompletionTokens == nil || *got.Usage.CompletionTokens != 5 {
+		t.Fatalf("completion tokens = %+v, want 5", got.Usage.CompletionTokens)
+	}
+	if got.Usage.TotalTokens == nil || *got.Usage.TotalTokens != 20 {
+		t.Fatalf("total tokens = %+v, want 20", got.Usage.TotalTokens)
+	}
+	if got.Usage.CachedTokens == nil || *got.Usage.CachedTokens != 3 {
+		t.Fatalf("cached tokens = %+v, want 3", got.Usage.CachedTokens)
+	}
+	if got.FinishReason == nil || *got.FinishReason != "end_turn" {
+		t.Fatalf("finish reason = %+v, want end_turn", got.FinishReason)
+	}
+}
+
+func TestProxyAnthropicMessagesStream(t *testing.T) {
+	chunks := []string{
+		"event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_1\",\"usage\":{\"input_tokens\":10,\"cache_creation_input_tokens\":2,\"cache_read_input_tokens\":3,\"output_tokens\":1}}}\n\n",
+		"event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"hi\"}}\n\n",
+		"event: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\",\"stop_sequence\":null},\"usage\":{\"output_tokens\":5}}\n\n",
+		"event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n",
+	}
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		for _, chunk := range chunks {
+			_, _ = io.WriteString(w, chunk)
+			w.(http.Flusher).Flush()
+		}
+	}))
+	defer upstream.Close()
+
+	sink := &sliceSink{}
+	proxy := gateway.New(&fakeConfig{
+		token:     "client-key",
+		anthropic: []gateway.Target{{ProviderID: "p1", ProviderName: "prov", BaseURL: upstream.URL + "/v1", APIKey: "upstream-secret", Model: "claude-upstream", Endpoint: gateway.EndpointAnthropic}},
+	}, sink, nil)
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader(`{"model":"alias","stream":true,"max_tokens":64,"messages":[]}`))
+	req.Header.Set("Authorization", "Bearer client-key")
+	proxy.ServeHTTP(rec, req)
+
+	if rec.Code != 200 {
+		t.Fatalf("status = %d, body %s", rec.Code, rec.Body.String())
+	}
+	if rec.Body.String() != strings.Join(chunks, "") {
+		t.Fatalf("stream bytes changed:\n%s", rec.Body.String())
+	}
+	got := sink.records[0]
+	if !got.Stream || got.Endpoint != gateway.EndpointAnthropic {
+		t.Fatalf("unexpected record %+v", got)
+	}
+	if got.Usage.PromptTokens == nil || *got.Usage.PromptTokens != 15 {
+		t.Fatalf("prompt tokens = %+v, want 15", got.Usage.PromptTokens)
+	}
+	if got.Usage.CompletionTokens == nil || *got.Usage.CompletionTokens != 5 {
+		t.Fatalf("completion tokens = %+v, want 5", got.Usage.CompletionTokens)
+	}
+	if got.Usage.TotalTokens == nil || *got.Usage.TotalTokens != 20 {
+		t.Fatalf("total tokens = %+v, want 20", got.Usage.TotalTokens)
+	}
+	if got.FinishReason == nil || *got.FinishReason != "end_turn" {
+		t.Fatalf("finish reason = %+v, want end_turn", got.FinishReason)
+	}
+}
+
+func TestProxyAnthropicAuthStyleAndVersion(t *testing.T) {
+	var seenKey, seenAuth, seenVersion string
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		seenKey = r.Header.Get("x-api-key")
+		seenAuth = r.Header.Get("Authorization")
+		seenVersion = r.Header.Get("anthropic-version")
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"type":"message","content":[],"usage":{"input_tokens":1,"output_tokens":1}}`)
+	}))
+	defer upstream.Close()
+
+	proxy := gateway.New(&fakeConfig{
+		token: "client-key",
+		// A compatible gateway that reads Bearer on its Anthropic surface.
+		anthropic: []gateway.Target{{
+			ProviderID: "p1", BaseURL: upstream.URL + "/v1", APIKey: "upstream-secret",
+			Model: "claude-upstream", Endpoint: gateway.EndpointAnthropic, AuthStyle: gateway.AuthStyleBearer,
+		}},
+	}, &sliceSink{}, nil)
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader(`{"model":"alias","max_tokens":8,"messages":[]}`))
+	// Anthropic clients authenticate with x-api-key, not a Bearer token.
+	req.Header.Set("x-api-key", "client-key")
+	req.Header.Set("anthropic-version", "2024-01-01")
+	proxy.ServeHTTP(rec, req)
+
+	if rec.Code != 200 {
+		t.Fatalf("status = %d, body %s", rec.Code, rec.Body.String())
+	}
+	// auth_style bearer means Bearer only, and the client key never leaks.
+	if seenAuth != "Bearer upstream-secret" || seenKey != "" {
+		t.Fatalf("upstream credentials = authorization %q, x-api-key %q", seenAuth, seenKey)
+	}
+	if seenVersion != "2024-01-01" {
+		t.Fatalf("client version was replaced: %q", seenVersion)
+	}
+}
+
+func TestProxyAnthropicCountTokens(t *testing.T) {
+	var seenPath string
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		seenPath = r.URL.Path
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"input_tokens":42}`)
+	}))
+	defer upstream.Close()
+
+	sink := &sliceSink{}
+	proxy := gateway.New(&fakeConfig{
+		token:     "client-key",
+		anthropic: []gateway.Target{{ProviderID: "p1", BaseURL: upstream.URL + "/v1", APIKey: "upstream-secret", Model: "claude-upstream", Endpoint: gateway.EndpointAnthropic}},
+	}, sink, nil)
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/v1/messages/count_tokens", strings.NewReader(`{"model":"alias","messages":[{"role":"user","content":"hello"}]}`))
+	req.Header.Set("Authorization", "Bearer client-key")
+	proxy.ServeHTTP(rec, req)
+
+	if rec.Code != 200 || rec.Body.String() != `{"input_tokens":42}` {
+		t.Fatalf("response = %d %s", rec.Code, rec.Body.String())
+	}
+	if seenPath != "/v1/messages/count_tokens" {
+		t.Fatalf("upstream path = %q", seenPath)
+	}
+	if len(sink.records) != 1 {
+		t.Fatalf("records = %d", len(sink.records))
+	}
+	got := sink.records[0]
+	if got.Endpoint != gateway.EndpointAnthropic || got.Stream {
+		t.Fatalf("unexpected record %+v", got)
+	}
+	if got.Usage.PromptTokens != nil || got.Usage.TotalTokens != nil {
+		t.Fatalf("count_tokens must not record usage, got %+v", got.Usage)
+	}
+}
+
+func TestProxyAnthropicErrorsUseAnthropicEnvelope(t *testing.T) {
+	proxy := gateway.New(&fakeConfig{token: "client-key"}, &sliceSink{}, nil)
+
+	cases := []struct {
+		name   string
+		path   string
+		auth   bool
+		body   string
+		status int
+		errTyp string
+	}{
+		{"unauthorized", "/v1/messages", false, `{"model":"alias","max_tokens":1,"messages":[]}`, 401, "authentication_error"},
+		{"unknown model", "/v1/messages", true, `{"model":"missing","max_tokens":1,"messages":[]}`, 404, "not_found_error"},
+		{"bad body", "/v1/messages", true, `not json`, 400, "invalid_request_error"},
+		{"count tokens unknown", "/v1/messages/count_tokens", true, `{"model":"missing","messages":[]}`, 404, "not_found_error"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			rec := httptest.NewRecorder()
+			req := httptest.NewRequest(http.MethodPost, c.path, strings.NewReader(c.body))
+			if c.auth {
+				req.Header.Set("Authorization", "Bearer client-key")
+			}
+			proxy.ServeHTTP(rec, req)
+			if rec.Code != c.status {
+				t.Fatalf("status = %d, want %d", rec.Code, c.status)
+			}
+			var body struct {
+				Type  string `json:"type"`
+				Error struct {
+					Type string `json:"type"`
+				} `json:"error"`
+			}
+			if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+				t.Fatal(err)
+			}
+			if body.Type != "error" || body.Error.Type != c.errTyp {
+				t.Fatalf("envelope = %+v, want %s", body, c.errTyp)
+			}
+		})
+	}
+}
+
+func TestProxyAnthropicModelsShape(t *testing.T) {
+	proxy := gateway.New(&fakeConfig{
+		token:  "client-key",
+		models: []string{"claude", "gpt"},
+		named: map[string]map[gateway.EndpointType][]gateway.Target{
+			"claude": {gateway.EndpointAnthropic: {{ProviderID: "p1", ProviderName: "prov", BaseURL: "http://x", Model: "claude-upstream"}}},
+			"gpt":    {gateway.EndpointChat: {{ProviderID: "p1", ProviderName: "prov", BaseURL: "http://x", Model: "gpt-x"}}},
+		},
+	}, &sliceSink{}, nil)
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/v1/models", nil)
+	req.Header.Set("Authorization", "Bearer client-key")
+	req.Header.Set("anthropic-version", "2023-06-01")
+	proxy.ServeHTTP(rec, req)
+	if rec.Code != 200 {
+		t.Fatalf("status = %d", rec.Code)
+	}
+	var body struct {
+		Data []struct {
+			Type        string `json:"type"`
+			ID          string `json:"id"`
+			DisplayName string `json:"display_name"`
+			CreatedAt   string `json:"created_at"`
+		} `json:"data"`
+		HasMore bool    `json:"has_more"`
+		FirstID *string `json:"first_id"`
+		LastID  *string `json:"last_id"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatal(err)
+	}
+	if len(body.Data) != 1 || body.HasMore {
+		t.Fatalf("unexpected model list %+v", body)
+	}
+	if body.Data[0].Type != "model" || body.Data[0].ID != "claude" || body.Data[0].DisplayName != "claude" || body.Data[0].CreatedAt == "" {
+		t.Fatalf("unexpected model object %+v", body.Data[0])
+	}
+	if body.FirstID == nil || *body.FirstID != "claude" || body.LastID == nil || *body.LastID != "claude" {
+		t.Fatalf("first/last = %v/%v", body.FirstID, body.LastID)
+	}
+}
+
+func TestProxyAnthropicDeniesDisallowedModel(t *testing.T) {
+	sink := &sliceSink{}
+	proxy := gateway.New(&fakeConfig{
+		token: "k",
+		key:   policyKey(t, `^other`, "", ""),
+		anthropic: []gateway.Target{{
+			ProviderID: "p1", ProviderName: "prov", BaseURL: "http://x", Model: "claude-upstream", Endpoint: gateway.EndpointAnthropic,
+		}},
+	}, sink, nil)
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader(`{"model":"alias","max_tokens":8,"messages":[]}`))
+	req.Header.Set("Authorization", "Bearer k")
+	proxy.ServeHTTP(rec, req)
+
+	if rec.Code != 403 {
+		t.Fatalf("status = %d, body %s", rec.Code, rec.Body.String())
+	}
+	var body struct {
+		Type  string `json:"type"`
+		Error struct {
+			Type string `json:"type"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatal(err)
+	}
+	if body.Type != "error" || body.Error.Type != "permission_error" {
+		t.Fatalf("unexpected envelope %+v", body)
+	}
+	if len(sink.records) != 1 {
+		t.Fatalf("records = %d", len(sink.records))
+	}
+	denied := sink.records[0]
+	if denied.Outcome != gateway.OutcomeRejected || denied.Endpoint != gateway.EndpointAnthropic || denied.UpstreamModel != "claude-upstream" {
+		t.Fatalf("unexpected denial record %+v", denied)
+	}
+}
+
+func TestProxyAnthropicAppliesTransformer(t *testing.T) {
+	var seen map[string]any
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		_ = json.Unmarshal(body, &seen)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"type":"message","content":[],"usage":{"input_tokens":1,"output_tokens":1}}`)
+	}))
+	defer upstream.Close()
+
+	sink := &sliceSink{}
+	proxy := gateway.New(&fakeConfig{
+		token:     "client-key",
+		anthropic: []gateway.Target{{ProviderID: "p1", BaseURL: upstream.URL + "/v1", Model: "claude-upstream", Endpoint: gateway.EndpointAnthropic}},
+		transform: func(body []byte) ([]byte, string, error) {
+			var in map[string]any
+			if err := json.Unmarshal(body, &in); err != nil {
+				return nil, "", err
+			}
+			if in["model"] != "claude-upstream" {
+				t.Errorf("transform saw model %v, want rewritten upstream model", in["model"])
+			}
+			in["shaped"] = true
+			out, err := json.Marshal(in)
+			return out, "shape", err
+		},
+	}, sink, nil)
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader(`{"model":"alias","max_tokens":8,"messages":[]}`))
+	req.Header.Set("Authorization", "Bearer client-key")
+	proxy.ServeHTTP(rec, req)
+
+	if rec.Code != 200 {
+		t.Fatalf("status = %d, body %s", rec.Code, rec.Body.String())
+	}
+	if seen["shaped"] != true {
+		t.Fatalf("transformed body did not reach upstream: %+v", seen)
+	}
+	if len(sink.records) != 1 || sink.records[0].Transformer != "shape" {
+		t.Fatalf("expected transformer name in log, got %+v", sink.records)
+	}
+}
+
+func TestProxyAnthropicStreamErrorEvent(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = io.WriteString(w, "event: error\ndata: {\"type\":\"error\",\"error\":{\"type\":\"overloaded_error\",\"message\":\"busy\"}}\n\n")
+	}))
+	defer upstream.Close()
+
+	sink := &sliceSink{}
+	proxy := gateway.New(&fakeConfig{
+		token:     "client-key",
+		anthropic: []gateway.Target{{ProviderID: "p1", BaseURL: upstream.URL + "/v1", Model: "claude-upstream", Endpoint: gateway.EndpointAnthropic}},
+	}, sink, nil)
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader(`{"model":"alias","stream":true,"max_tokens":8,"messages":[]}`))
+	req.Header.Set("Authorization", "Bearer client-key")
+	proxy.ServeHTTP(rec, req)
+
+	if rec.Code != 200 {
+		t.Fatalf("status = %d", rec.Code)
+	}
+	if len(sink.records) != 1 {
+		t.Fatalf("records = %d", len(sink.records))
+	}
+	got := sink.records[0]
+	if got.Outcome != gateway.OutcomeUpstreamError || !strings.Contains(got.Error, "busy") {
+		t.Fatalf("unexpected stream error record %+v", got)
 	}
 }

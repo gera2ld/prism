@@ -21,15 +21,19 @@ const transformTimeout = 5 * time.Second
 type Transformer struct {
 	Name       string
 	ProviderID string
-	Pattern    *regexp.Regexp
-	Priority   float64
-	expr       *gnata.Expression
+	// Endpoint scopes the transformer to one surface. Empty applies to
+	// every endpoint kind, which is the pre-existing behavior.
+	Endpoint EndpointType
+	Pattern  *regexp.Regexp
+	Priority float64
+	expr     *gnata.Expression
 }
 
 // CompileTransformer validates and compiles a transformer definition.
 // pattern is an unanchored RE2 regexp matched against the upstream model
-// name (^…$ for exact, ^… for prefix). expression must be JSONata.
-func CompileTransformer(name, providerID, pattern string, priority float64, expression string) (Transformer, error) {
+// name (^…$ for exact, ^… for prefix). endpoint scopes it to one surface;
+// empty means any. expression must be JSONata.
+func CompileTransformer(name, providerID, pattern string, endpoint EndpointType, priority float64, expression string) (Transformer, error) {
 	re, err := regexp.Compile(pattern)
 	if err != nil {
 		return Transformer{}, fmt.Errorf("bad model pattern: %w", err)
@@ -38,12 +42,16 @@ func CompileTransformer(name, providerID, pattern string, priority float64, expr
 	if err != nil {
 		return Transformer{}, fmt.Errorf("bad expression: %w", err)
 	}
-	return Transformer{Name: name, ProviderID: providerID, Pattern: re, Priority: priority, expr: expr}, nil
+	return Transformer{Name: name, ProviderID: providerID, Endpoint: endpoint, Pattern: re, Priority: priority, expr: expr}, nil
 }
 
 // Matches reports whether the transformer applies to this resolved target.
-// Provider matches exactly; the model pattern is an unanchored regexp.
-func (t Transformer) Matches(providerID, model string) bool {
+// Provider matches exactly; the model pattern is an unanchored regexp; an
+// empty endpoint matches every surface.
+func (t Transformer) Matches(providerID, model string, endpoint EndpointType) bool {
+	if t.Endpoint != "" && t.Endpoint != endpoint {
+		return false
+	}
 	return t.ProviderID == providerID && t.Pattern.MatchString(model)
 }
 

@@ -1,7 +1,6 @@
 package gateway
 
 import (
-	"bytes"
 	"context"
 	"encoding/base64"
 	"encoding/json"
@@ -400,20 +399,5 @@ func rewriteImageBody(raw []byte, target Target) []byte {
 }
 
 func newUpstreamImagesRequest(r *http.Request, raw []byte, target Target, suffix string) (*http.Request, error) {
-	url := strings.TrimSuffix(target.BaseURL, "/") + suffix
-	upstream, err := http.NewRequestWithContext(r.Context(), http.MethodPost, url, bytes.NewReader(raw))
-	if err != nil {
-		return nil, err
-	}
-	upstream.Header = http.Header{}
-	for key, values := range r.Header {
-		if !hopByHop(key) && !strings.EqualFold(key, "Authorization") && !strings.EqualFold(key, "Host") {
-			upstream.Header[key] = values
-		}
-	}
-	if target.APIKey != "" {
-		upstream.Header.Set("Authorization", "Bearer "+target.APIKey)
-	}
-	upstream.Host = upstream.URL.Host
-	return upstream, nil
+	return newUpstreamJSONRequest(r, raw, target, suffix)
 }
